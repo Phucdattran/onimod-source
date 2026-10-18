@@ -411,6 +411,7 @@ static uintptr_t g_addr_HasAnyCheat     = 0;  // AntiCheatData.HasAnyCheat
 static uintptr_t g_addr_IsRemoveAds     = 0;  // AdsManager.IsRemoveAds
 static uintptr_t g_addr_ShowInterstitial= 0;  // AdsManager.ShowInterstitialAds
 static uintptr_t g_addr_ShowBanner      = 0;  // AdsManager.ShowBannerAds
+static uintptr_t g_addr_AppLovinBanner  = 0;  // AppLovinMAXManager.ShowBannerAd
 static uintptr_t g_addr_ModifyGold      = 0;  // LocalSave.Modify_Gold
 static uintptr_t g_addr_ModifyDiamond   = 0;  // LocalSave.Modify_Diamond
 static uintptr_t g_addr_ModifyIvory     = 0;  // LocalSave.Modify_Ivory
@@ -510,6 +511,13 @@ bool h_ShowInterstitialAds(void* _this, void* mi) {
 bool h_ShowBannerAds(void* _this, void* mi) {
     if (g_feature1.load(std::memory_order_acquire)) return false;
     return o_ShowBannerAds ? o_ShowBannerAds(_this, mi) : false;
+}
+
+// AppLovinMAXManager.ShowBannerAd — gọi trực tiếp không qua AdsManager
+void (*o_AppLovinBanner)(void*, void*) = nullptr;
+void h_AppLovinBanner(void* _this, void* mi) {
+    if (g_feature1.load(std::memory_order_acquire)) return;
+    if (o_AppLovinBanner) o_AppLovinBanner(_this, mi);
 }
 
 // ==========================================
@@ -693,6 +701,36 @@ void* h_t(void*) {
         installed += DoHook((void*)g_addr_HasAnyCheat,
                             (void*)h_HasAnyCheat, (void**)&o_HasAnyCheat,
                             "HasAnyCheat");
+
+    // Bỏ quảng cáo — hook sớm ở Phase 1 vì banner xuất hiện ngay khi khởi động
+    g_addr_IsRemoveAds     = Tim_Ham(OBFUSCATE("com.F4A.MobileThird"), OBFUSCATE("AdsManager"),
+                                     OBFUSCATE("IsRemoveAds"), 0);
+    g_addr_ShowInterstitial= Tim_Ham(OBFUSCATE("com.F4A.MobileThird"), OBFUSCATE("AdsManager"),
+                                     OBFUSCATE("ShowInterstitialAds"), 0);
+    g_addr_ShowBanner      = Tim_Ham(OBFUSCATE("com.F4A.MobileThird"), OBFUSCATE("AdsManager"),
+                                     OBFUSCATE("ShowBannerAds"), 0);
+    g_addr_AppLovinBanner  = Tim_Ham(OBFUSCATE(""), OBFUSCATE("AppLovinMAXManager"),
+                                     OBFUSCATE("ShowBannerAd"), 0);
+    LOGI("[%s] PHASE1 ads:", BUILD_ID);
+    LOGI("  IsRemoveAds:      0x%" PRIxPTR, g_addr_IsRemoveAds);
+    LOGI("  ShowInterstitial: 0x%" PRIxPTR, g_addr_ShowInterstitial);
+    LOGI("  ShowBanner:       0x%" PRIxPTR, g_addr_ShowBanner);
+    LOGI("  AppLovinBanner:   0x%" PRIxPTR, g_addr_AppLovinBanner);
+
+    if (g_addr_IsRemoveAds)
+        installed += DoHook((void*)g_addr_IsRemoveAds,
+                            (void*)h_IsRemoveAds, (void**)&o_IsRemoveAds, "IsRemoveAds");
+    if (g_addr_ShowInterstitial)
+        installed += DoHook((void*)g_addr_ShowInterstitial,
+                            (void*)h_ShowInterstitialAds, (void**)&o_ShowInterstitialAds,
+                            "ShowInterstitialAds");
+    if (g_addr_ShowBanner)
+        installed += DoHook((void*)g_addr_ShowBanner,
+                            (void*)h_ShowBannerAds, (void**)&o_ShowBannerAds, "ShowBannerAds");
+    if (g_addr_AppLovinBanner)
+        installed += DoHook((void*)g_addr_AppLovinBanner,
+                            (void*)h_AppLovinBanner, (void**)&o_AppLovinBanner, "AppLovinBannerAd");
+
     LOGI("[%s] PHASE1 done", BUILD_ID);
 
     // ==========================================
@@ -738,29 +776,6 @@ void* h_t(void*) {
         installed += DoHook((void*)g_addr_HandleFail,
                             (void*)h_HandlePurchaseFailure, (void**)&o_HandlePurchaseFailure,
                             "HandlePurchaseFailure");
-
-    // Bỏ quảng cáo
-    g_addr_IsRemoveAds     = Tim_Ham(OBFUSCATE("com.F4A.MobileThird"), OBFUSCATE("AdsManager"),
-                                     OBFUSCATE("IsRemoveAds"), 0);
-    g_addr_ShowInterstitial= Tim_Ham(OBFUSCATE("com.F4A.MobileThird"), OBFUSCATE("AdsManager"),
-                                     OBFUSCATE("ShowInterstitialAds"), 0);
-    g_addr_ShowBanner      = Tim_Ham(OBFUSCATE("com.F4A.MobileThird"), OBFUSCATE("AdsManager"),
-                                     OBFUSCATE("ShowBannerAds"), 0);
-    LOGI("[%s] PHASE2 ads:", BUILD_ID);
-    LOGI("  IsRemoveAds:      0x%" PRIxPTR, g_addr_IsRemoveAds);
-    LOGI("  ShowInterstitial: 0x%" PRIxPTR, g_addr_ShowInterstitial);
-    LOGI("  ShowBanner:       0x%" PRIxPTR, g_addr_ShowBanner);
-
-    if (g_addr_IsRemoveAds)
-        installed += DoHook((void*)g_addr_IsRemoveAds,
-                            (void*)h_IsRemoveAds, (void**)&o_IsRemoveAds, "IsRemoveAds");
-    if (g_addr_ShowInterstitial)
-        installed += DoHook((void*)g_addr_ShowInterstitial,
-                            (void*)h_ShowInterstitialAds, (void**)&o_ShowInterstitialAds,
-                            "ShowInterstitialAds");
-    if (g_addr_ShowBanner)
-        installed += DoHook((void*)g_addr_ShowBanner,
-                            (void*)h_ShowBannerAds, (void**)&o_ShowBannerAds, "ShowBannerAds");
 
     // Đóng băng tài nguyên
     g_addr_ModifyGold     = Tim_Ham(OBFUSCATE(""), OBFUSCATE("LocalSave"),
