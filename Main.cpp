@@ -28,8 +28,7 @@
 // index 0 → toggle Free Shop
 // index 1 → seekbar Speed (1–20)
 // ==========================================
-std::atomic<bool>  g_feature0{false};
-std::atomic<float> g_feature1{1.0f};
+std::atomic<bool> g_feature0{false};
 static std::atomic<bool> g_config_loaded_once{false};
 
 // ==========================================
@@ -483,23 +482,11 @@ bool h_HasAnyCheat(void* _this, void* methodInfo) {
     return false;
 }
 
-// Speed hack
-void (*o_set_timeScale)(float, void*) = nullptr;
-void h_set_timeScale(float value, void* methodInfo) {
-    float speed = g_feature1.load(std::memory_order_acquire);
-    if (speed > 1.0f) {
-        if (o_set_timeScale) o_set_timeScale(speed, methodInfo);
-        return;
-    }
-    if (o_set_timeScale) o_set_timeScale(value, methodInfo);
-}
-
+//==========================================
+// ParseMenuConfig — đọc field đầu tiên từ HAMOD (1 hoặc 7 fields)
 // ==========================================
-// ParseMenuConfig — đọc 1/2/7 fields từ HAMOD
-// ==========================================
-static bool ParseMenuConfig(const char* text, bool* shop, float* speed,
-                            bool* has_speed, unsigned* field_count) {
-    if (!text || !shop || !speed || !has_speed || !field_count) return false;
+static bool ParseMenuConfig(const char* text, bool* shop, unsigned* field_count) {
+    if (!text || !shop || !field_count) return false;
     float values[7] = {}; unsigned count = 0;
     const char* cursor = text;
     while (true) {
@@ -513,12 +500,9 @@ static bool ParseMenuConfig(const char* text, bool* shop, float* speed,
         values[count++] = value;
         cursor = end;
     }
-    if ((count != 1 && count != 2 && count != 7) ||
+    if ((count != 1 && count != 7) ||
         (values[0] != 0.0f && values[0] != 1.0f)) return false;
-    *shop      = values[0] == 1.0f;
-    *has_speed = count >= 2;
-    if (*has_speed)
-        *speed = values[1] < 1.0f ? 1.0f : (values[1] > 20.0f ? 20.0f : values[1]);
+    *shop        = values[0] == 1.0f;
     *field_count = count;
     return true;
 }
@@ -556,9 +540,8 @@ void* Doc_Config_Ngam(void*) {
     LOGI("[%s] CONFIG begin: pid=%d", BUILD_ID, getpid());
     for (size_t i = 0; i < path_count; ++i) LOGI("CONFIG candidate[%zu]=%s", i, paths[i]);
 
-    static float s_last_applied_speed = 1.0f;
     int last_status = -1, last_path = -1;
-    bool last_shop = false; float last_speed = 1.0f;
+    bool last_shop = false;
     while (true) {
         FILE* file = nullptr; int selected = -1;
         for (size_t i = 0; i < path_count; ++i) {
@@ -574,28 +557,19 @@ void* Doc_Config_Ngam(void*) {
         const size_t length = fread(text, 1, sizeof(text) - 1, file);
         const bool read_ok = !ferror(file) && length < sizeof(text) - 1;
         fclose(file);
-        bool shop = false, has_speed = false; unsigned field_count = 0;
-        float speed = g_feature1.load(std::memory_order_acquire);
+        bool shop = false; unsigned field_count = 0;
         if (!read_ok || memchr(text, '\0', length) ||
-            !ParseMenuConfig(text, &shop, &speed, &has_speed, &field_count)) {
+            !ParseMenuConfig(text, &shop, &field_count)) {
             if (last_status != 1 || last_path != selected)
-                LOGE("CONFIG invalid: path=%s expected 1/2/7 fields", paths[selected]);
+                LOGE("CONFIG invalid: path=%s expected 1/7 fields", paths[selected]);
             last_status = 1; last_path = selected; usleep(500000); continue;
-        }
-        if (has_speed) {
-            g_feature1.store(speed, std::memory_order_release);
-            if (o_set_timeScale && speed != s_last_applied_speed) {
-                o_set_timeScale(speed, nullptr);
-                s_last_applied_speed = speed;
-                LOGI("[Speed] Applied timeScale=%.1f", speed);
-            }
         }
         g_config_loaded_once.store(true, std::memory_order_release);
         g_feature0.store(shop, std::memory_order_release);
-        if (last_status != 2 || last_path != selected || last_shop != shop || last_speed != speed)
-            LOGI("CONFIG applied: path=%s shop=%d speed=%.2f fields=%u",
-                 paths[selected], shop, speed, field_count);
-        last_status = 2; last_path = selected; last_shop = shop; last_speed = speed;
+        if (last_status != 2 || last_path != selected || last_shop != shop)
+            LOGI("CONFIG applied: path=%s shop=%d fields=%u",
+                 paths[selected], shop, field_count);
+        last_status = 2; last_path = selected; last_shop = shop;
         usleep(500000);
     }
     return nullptr;
@@ -656,13 +630,6 @@ void* h_t(void*) {
         installed += DoHook((void*)g_addr_HasAnyCheat,
                             (void*)h_HasAnyCheat, (void**)&o_HasAnyCheat,
                             "HasAnyCheat");
-
-    // Speed (Tim_Ham — không cần offset)
-    uintptr_t addr_ts = Tim_Ham(OBFUSCATE("UnityEngine"), OBFUSCATE("Time"),
-                                OBFUSCATE("set_timeScale"), 1);
-    if (addr_ts)
-        installed += DoHook((void*)addr_ts, (void*)h_set_timeScale,
-                            (void**)&o_set_timeScale, "Time.set_timeScale");
 
     LOGI("[%s] HOOK DONE: %u installed", BUILD_ID, installed);
     if (il2cpp_thread_detach) il2cpp_thread_detach(thread);
