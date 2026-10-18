@@ -18,24 +18,10 @@
 #include "Includes/obfuscate.h"
 #include <Dobby/dobby.h>
 
-#define BUILD_ID "CTQ_v1.13"
+#define BUILD_ID "CTQ_AUTO"
 #define LOG_TAG  "HAMOD_CTQ"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
-
-// ==========================================
-// OFFSET BẢN v1.13.4448
-// ==========================================
-#define OFF_BUY_PRODUCT         0x2959C60
-#define OFF_GET_INSTANCE        0x2557B90
-#define OFF_SEND                0x255A3BC
-#define OFF_SET_PROGRESS        0x2558220
-#define OFF_HANDLE_FAIL         0x25586EC
-#define OFF_REPORT_GRANT        0x255D234
-#define OFF_REFUSE_UNLOCK       0x255D538
-#define OFF_ANTI_TRIGGER        0x2477160
-#define OFF_ANTI_AUTOBAN        0x2479FF4
-#define OFF_ANTI_HASANY         0x247A6D8
 
 // ==========================================
 // BIẾN ĐIỀU KHIỂN TỪ MENU
@@ -231,18 +217,6 @@ public:
 };
 
 // ==========================================
-// PATCH HEX (dùng RET để bịt mõm anti-cheat)
-// ==========================================
-void oni_patch(uintptr_t offset, uint32_t ins) {
-    if (g_il2cpp_image.base == 0) return;
-    void* addr = (void*)(g_il2cpp_image.base + offset);
-    uintptr_t page_start = (uintptr_t)addr & ~0xFFF;
-    mprotect((void*)page_start, 0x2000, PROT_READ | PROT_WRITE | PROT_EXEC);
-    *(uint32_t*)addr = ins;
-    __builtin___clear_cache((char*)addr, (char*)addr + 4);
-}
-
-// ==========================================
 // isIl2cppLoaded — capture phdr info
 // ==========================================
 bool isIl2cppLoaded() {
@@ -328,7 +302,8 @@ bool InitIl2cpp() {
 // ==========================================
 // Tim_Ham — tìm method address qua assemblies
 // ==========================================
-uintptr_t Tim_Ham(const char* ns, const char* className, const char* methodName, int argsCount) {
+static uintptr_t Tim_Ham(const char* ns, const char* className,
+                         const char* methodName, int argsCount) {
     if (!il2cpp_domain_get || !il2cpp_domain_get_assemblies ||
         !il2cpp_assembly_get_image || !il2cpp_class_from_name ||
         !il2cpp_class_get_method_from_name) return 0;
@@ -350,11 +325,52 @@ uintptr_t Tim_Ham(const char* ns, const char* className, const char* methodName,
 }
 
 // ==========================================
+// Tim_Ham_Send_String
+// Tìm đúng overload: Send(System.String id, GrantSource source)
+// Phân biệt với Send(List<String> ids, GrantSource source)
+// bằng cách kiểm tra param[0] có type STRING (0x0E)
+// ==========================================
+static uintptr_t Tim_Ham_Send_String() {
+    if (!il2cpp_domain_get || !il2cpp_domain_get_assemblies ||
+        !il2cpp_assembly_get_image || !il2cpp_class_from_name ||
+        !il2cpp_class_get_methods || !il2cpp_method_get_name ||
+        !il2cpp_method_get_param_count || !il2cpp_method_get_param ||
+        !il2cpp_type_get_type) return 0;
+    void* domain = il2cpp_domain_get();
+    if (!domain) return 0;
+    size_t size = 0;
+    void** assemblies = il2cpp_domain_get_assemblies(domain, &size);
+    if (!assemblies) return 0;
+    for (size_t i = 0; i < size; ++i) {
+        void* image = il2cpp_assembly_get_image(assemblies[i]);
+        if (!image) continue;
+        void* klass = il2cpp_class_from_name(image, OBFUSCATE(""), OBFUSCATE("PurchaseManager"));
+        if (!klass) continue;
+        void* iter = nullptr;
+        while (void* method = il2cpp_class_get_methods(klass, &iter)) {
+            const char* name = il2cpp_method_get_name(method);
+            if (!name || strcmp(name, OBFUSCATE("Send")) != 0) continue;
+            if (il2cpp_method_get_param_count(method) != 2) continue;
+            // param[0] phải là System.String (IL2CPP_TYPE_STRING = 0x0E)
+            void* p0 = il2cpp_method_get_param(method, 0);
+            if (!p0 || il2cpp_type_get_type(p0) != 0x0E) continue;
+            uintptr_t addr = (uintptr_t)*(void**)method;
+            if (addr) {
+                LOGI("[%s] Send(String,GrantSource): 0x%" PRIxPTR, BUILD_ID, addr);
+                return addr;
+            }
+        }
+    }
+    LOGE("[%s] Send(String,GrantSource): NOT FOUND", BUILD_ID);
+    return 0;
+}
+
+// ==========================================
 // DoHook — validate địa chỉ trước khi hook
 // ==========================================
-bool DoHook(void* fn, void* hook, void** orig, const char* tag) {
+static bool DoHook(void* fn, void* hook, void** orig, const char* tag) {
     if (!hook || !orig || !ImageContains(reinterpret_cast<uintptr_t>(fn), 1, PF_X)) {
-        LOGE("Hook SKIP (invalid IL2CPP code address): %s @ %p", tag, fn);
+        LOGE("Hook SKIP (invalid addr): %s @ %p", tag, fn);
         return false;
     }
     const int result = DobbyHook(fn, hook, orig);
@@ -364,17 +380,84 @@ bool DoHook(void* fn, void* hook, void** orig, const char* tag) {
 }
 
 // ==========================================
+// oni_patch_at — patch bằng địa chỉ tuyệt đối
+// ==========================================
+static void oni_patch_at(uintptr_t addr, uint32_t ins) {
+    if (!ImageContains(addr, 4, PF_X)) {
+        LOGE("oni_patch_at: invalid addr 0x%" PRIxPTR, addr);
+        return;
+    }
+    uintptr_t page_start = addr & ~0xFFF;
+    mprotect((void*)page_start, 0x2000, PROT_READ | PROT_WRITE | PROT_EXEC);
+    *(uint32_t*)addr = ins;
+    __builtin___clear_cache((char*)addr, (char*)addr + 4);
+}
+
+// ==========================================
+// ĐỊA CHỈ CÁC HÀM (tìm runtime, không hardcode)
+// ==========================================
+static uintptr_t g_addr_BuyProduct    = 0;  // IAPManager.BuyProductByID
+static uintptr_t g_addr_GetInstance   = 0;  // PurchaseManager.get_Instance
+static uintptr_t g_addr_Send          = 0;  // PurchaseManager.Send(String, GrantSource)
+static uintptr_t g_addr_SetProgress   = 0;  // PurchaseManager.SetProgress(bool)
+static uintptr_t g_addr_HandleFail    = 0;  // PurchaseManager.HandlePurchaseFailure
+static uintptr_t g_addr_ReportGrant   = 0;  // PurchaseManager.ReportUnauthorizedGrant
+static uintptr_t g_addr_RefuseUnlock  = 0;  // PurchaseManager.RefuseUnlock
+static uintptr_t g_addr_AntiTrigger   = 0;  // AntiCheatData.TriggerCheatCode
+static uintptr_t g_addr_AntiAutoban   = 0;  // AntiCheatData.CheckAutoBan
+static uintptr_t g_addr_HasAnyCheat   = 0;  // AntiCheatData.HasAnyCheat
+
+static bool ResolveAllMethods() {
+    g_addr_BuyProduct   = Tim_Ham(OBFUSCATE("com.F4A.MobileThird"), OBFUSCATE("IAPManager"),
+                                  OBFUSCATE("BuyProductByID"), 1);
+    g_addr_GetInstance  = Tim_Ham(OBFUSCATE(""), OBFUSCATE("PurchaseManager"),
+                                  OBFUSCATE("get_Instance"), 0);
+    g_addr_Send         = Tim_Ham_Send_String();
+    g_addr_SetProgress  = Tim_Ham(OBFUSCATE(""), OBFUSCATE("PurchaseManager"),
+                                  OBFUSCATE("SetProgress"), 1);
+    g_addr_HandleFail   = Tim_Ham(OBFUSCATE(""), OBFUSCATE("PurchaseManager"),
+                                  OBFUSCATE("HandlePurchaseFailure"), 2);
+    g_addr_ReportGrant  = Tim_Ham(OBFUSCATE(""), OBFUSCATE("PurchaseManager"),
+                                  OBFUSCATE("ReportUnauthorizedGrant"), 1);
+    g_addr_RefuseUnlock = Tim_Ham(OBFUSCATE(""), OBFUSCATE("PurchaseManager"),
+                                  OBFUSCATE("RefuseUnlock"), 1);
+    g_addr_AntiTrigger  = Tim_Ham(OBFUSCATE(""), OBFUSCATE("AntiCheatData"),
+                                  OBFUSCATE("TriggerCheatCode"), 1);
+    g_addr_AntiAutoban  = Tim_Ham(OBFUSCATE(""), OBFUSCATE("AntiCheatData"),
+                                  OBFUSCATE("CheckAutoBan"), 1);
+    g_addr_HasAnyCheat  = Tim_Ham(OBFUSCATE(""), OBFUSCATE("AntiCheatData"),
+                                  OBFUSCATE("HasAnyCheat"), 0);
+
+    LOGI("[%s] RESOLVE RESULTS:", BUILD_ID);
+    LOGI("  BuyProduct:   0x%" PRIxPTR, g_addr_BuyProduct);
+    LOGI("  GetInstance:  0x%" PRIxPTR, g_addr_GetInstance);
+    LOGI("  Send:         0x%" PRIxPTR, g_addr_Send);
+    LOGI("  SetProgress:  0x%" PRIxPTR, g_addr_SetProgress);
+    LOGI("  HandleFail:   0x%" PRIxPTR, g_addr_HandleFail);
+    LOGI("  ReportGrant:  0x%" PRIxPTR, g_addr_ReportGrant);
+    LOGI("  RefuseUnlock: 0x%" PRIxPTR, g_addr_RefuseUnlock);
+    LOGI("  AntiTrigger:  0x%" PRIxPTR, g_addr_AntiTrigger);
+    LOGI("  AntiAutoban:  0x%" PRIxPTR, g_addr_AntiAutoban);
+    LOGI("  HasAnyCheat:  0x%" PRIxPTR, g_addr_HasAnyCheat);
+
+    return g_addr_BuyProduct && g_addr_GetInstance && g_addr_Send &&
+           g_addr_SetProgress && g_addr_HandleFail && g_addr_HasAnyCheat;
+}
+
+// ==========================================
 // HOOK HANDLERS
 // ==========================================
 
 // Lớp 1: Mua trực tiếp
 int (*o_BuyProductByID)(void*, void*, void*) = nullptr;
 int h_BuyProductByID(void* _this, void* productId, void* methodInfo) {
-    if (g_feature0.load(std::memory_order_acquire) && productId != nullptr && g_il2cpp_image.base != 0) {
-        void* pm_inst = ((void* (*)())(g_il2cpp_image.base + OFF_GET_INSTANCE))();
-        if (pm_inst != nullptr) {
-            ((bool (*)(void*, void*, int, void*))(g_il2cpp_image.base + OFF_SEND))(pm_inst, productId, 1, nullptr);
-            ((void (*)(void*, bool, void*))(g_il2cpp_image.base + OFF_SET_PROGRESS))(pm_inst, false, nullptr);
+    if (g_feature0.load(std::memory_order_acquire) && productId != nullptr) {
+        if (g_addr_GetInstance) {
+            void* pm_inst = ((void* (*)())(g_addr_GetInstance))();
+            if (pm_inst && g_addr_Send && g_addr_SetProgress) {
+                ((bool (*)(void*, void*, int, void*))(g_addr_Send))(pm_inst, productId, 1, nullptr);
+                ((void (*)(void*, bool, void*))(g_addr_SetProgress))(pm_inst, false, nullptr);
+            }
         }
         return 4;
     }
@@ -384,9 +467,11 @@ int h_BuyProductByID(void* _this, void* productId, void* methodInfo) {
 // Lớp 2: Hủy thanh toán -> Nhận đồ
 void (*o_HandlePurchaseFailure)(void*, void*, int, void*) = nullptr;
 void h_HandlePurchaseFailure(void* _this, void* id, int reason, void* methodInfo) {
-    if (g_feature0.load(std::memory_order_acquire) && id != nullptr && g_il2cpp_image.base != 0) {
-        ((bool (*)(void*, void*, int, void*))(g_il2cpp_image.base + OFF_SEND))(_this, id, 1, nullptr);
-        ((void (*)(void*, bool, void*))(g_il2cpp_image.base + OFF_SET_PROGRESS))(_this, false, nullptr);
+    if (g_feature0.load(std::memory_order_acquire) && id != nullptr) {
+        if (g_addr_Send && g_addr_SetProgress) {
+            ((bool (*)(void*, void*, int, void*))(g_addr_Send))(_this, id, 1, nullptr);
+            ((void (*)(void*, bool, void*))(g_addr_SetProgress))(_this, false, nullptr);
+        }
         return;
     }
     if (o_HandlePurchaseFailure) o_HandlePurchaseFailure(_this, id, reason, methodInfo);
@@ -529,12 +614,6 @@ void* h_t(void*) {
         return nullptr;
     }
 
-    // Bịt mõm anti-cheat bằng RET (ARM64: 0xD65F03C0)
-    oni_patch(OFF_ANTI_TRIGGER, 0xD65F03C0);
-    oni_patch(OFF_ANTI_AUTOBAN, 0xD65F03C0);
-    oni_patch(OFF_REPORT_GRANT, 0xD65F03C0);
-    oni_patch(OFF_REFUSE_UNLOCK, 0xD65F03C0);
-
     // Chờ assemblies stable (5 tick liên tiếp không đổi)
     size_t last = 0; int stable = 0;
     void* domain = il2cpp_domain_get();
@@ -552,20 +631,33 @@ void* h_t(void*) {
     }
     LOGI("Assemblies stable: %zu", last);
 
+    // Tìm tất cả địa chỉ tại runtime (không cần offset cứng)
+    if (!ResolveAllMethods())
+        LOGE("[%s] Some critical methods missing — partial functionality", BUILD_ID);
+
+    // Bịt mõm anti-cheat bằng RET (ARM64: 0xD65F03C0)
+    if (g_addr_AntiTrigger)  oni_patch_at(g_addr_AntiTrigger,  0xD65F03C0);
+    if (g_addr_AntiAutoban)  oni_patch_at(g_addr_AntiAutoban,  0xD65F03C0);
+    if (g_addr_ReportGrant)  oni_patch_at(g_addr_ReportGrant,  0xD65F03C0);
+    if (g_addr_RefuseUnlock) oni_patch_at(g_addr_RefuseUnlock, 0xD65F03C0);
+
     unsigned installed = 0;
 
-    // Free Shop (offset-based)
-    installed += DoHook((void*)(g_il2cpp_image.base + OFF_BUY_PRODUCT),
-                        (void*)h_BuyProductByID, (void**)&o_BuyProductByID,
-                        "BuyProductByID");
-    installed += DoHook((void*)(g_il2cpp_image.base + OFF_HANDLE_FAIL),
-                        (void*)h_HandlePurchaseFailure, (void**)&o_HandlePurchaseFailure,
-                        "HandlePurchaseFailure");
-    installed += DoHook((void*)(g_il2cpp_image.base + OFF_ANTI_HASANY),
-                        (void*)h_HasAnyCheat, (void**)&o_HasAnyCheat,
-                        "HasAnyCheat");
+    // Free Shop (địa chỉ tìm động)
+    if (g_addr_BuyProduct)
+        installed += DoHook((void*)g_addr_BuyProduct,
+                            (void*)h_BuyProductByID, (void**)&o_BuyProductByID,
+                            "BuyProductByID");
+    if (g_addr_HandleFail)
+        installed += DoHook((void*)g_addr_HandleFail,
+                            (void*)h_HandlePurchaseFailure, (void**)&o_HandlePurchaseFailure,
+                            "HandlePurchaseFailure");
+    if (g_addr_HasAnyCheat)
+        installed += DoHook((void*)g_addr_HasAnyCheat,
+                            (void*)h_HasAnyCheat, (void**)&o_HasAnyCheat,
+                            "HasAnyCheat");
 
-    // Speed (Tim_Ham qua IL2CPP API — không cần offset cứng)
+    // Speed (Tim_Ham — không cần offset)
     uintptr_t addr_ts = Tim_Ham(OBFUSCATE("UnityEngine"), OBFUSCATE("Time"),
                                 OBFUSCATE("set_timeScale"), 1);
     if (addr_ts)
