@@ -26,9 +26,12 @@
 // ==========================================
 // BIẾN ĐIỀU KHIỂN TỪ MENU
 // index 0 → toggle Free Shop
-// index 1 → seekbar Speed (1–20)
+// index 1 → toggle Bỏ quảng cáo
+// index 2 → toggle Đóng băng tài nguyên
 // ==========================================
-std::atomic<bool> g_feature0{false};
+std::atomic<bool> g_feature0{false};  // Free Shop
+std::atomic<bool> g_feature1{false};  // Bỏ quảng cáo
+std::atomic<bool> g_feature2{false};  // Đóng băng tài nguyên
 static std::atomic<bool> g_config_loaded_once{false};
 
 // ==========================================
@@ -402,9 +405,16 @@ static uintptr_t g_addr_SetProgress   = 0;  // PurchaseManager.SetProgress(bool)
 static uintptr_t g_addr_HandleFail    = 0;  // PurchaseManager.HandlePurchaseFailure
 static uintptr_t g_addr_ReportGrant   = 0;  // PurchaseManager.ReportUnauthorizedGrant
 static uintptr_t g_addr_RefuseUnlock  = 0;  // PurchaseManager.RefuseUnlock
-static uintptr_t g_addr_AntiTrigger   = 0;  // AntiCheatData.TriggerCheatCode
-static uintptr_t g_addr_AntiAutoban   = 0;  // AntiCheatData.CheckAutoBan
-static uintptr_t g_addr_HasAnyCheat   = 0;  // AntiCheatData.HasAnyCheat
+static uintptr_t g_addr_AntiTrigger     = 0;  // AntiCheatData.TriggerCheatCode
+static uintptr_t g_addr_AntiAutoban     = 0;  // AntiCheatData.CheckAutoBan
+static uintptr_t g_addr_HasAnyCheat     = 0;  // AntiCheatData.HasAnyCheat
+static uintptr_t g_addr_IsRemoveAds     = 0;  // AdsManager.IsRemoveAds
+static uintptr_t g_addr_ShowInterstitial= 0;  // AdsManager.ShowInterstitialAds
+static uintptr_t g_addr_ShowBanner      = 0;  // AdsManager.ShowBannerAds
+static uintptr_t g_addr_ModifyGold      = 0;  // LocalSave.Modify_Gold
+static uintptr_t g_addr_ModifyDiamond   = 0;  // LocalSave.Modify_Diamond
+static uintptr_t g_addr_ModifyIvory     = 0;  // LocalSave.Modify_Ivory
+static uintptr_t g_addr_ModifyKey       = 0;  // LocalSave.Modify_Key
 
 static bool ResolveAllMethods() {
     g_addr_BuyProduct   = Tim_Ham(OBFUSCATE("com.F4A.MobileThird"), OBFUSCATE("IAPManager"),
@@ -482,11 +492,63 @@ bool h_HasAnyCheat(void* _this, void* methodInfo) {
     return false;
 }
 
-//==========================================
-// ParseMenuConfig — đọc field đầu tiên từ HAMOD (1 hoặc 7 fields)
 // ==========================================
-static bool ParseMenuConfig(const char* text, bool* shop, unsigned* field_count) {
-    if (!text || !shop || !field_count) return false;
+// Bỏ quảng cáo — AdsManager hooks
+// ==========================================
+bool (*o_IsRemoveAds)(void*, void*)       = nullptr;
+bool (*o_ShowInterstitialAds)(void*, void*) = nullptr;
+bool (*o_ShowBannerAds)(void*, void*)     = nullptr;
+
+bool h_IsRemoveAds(void* _this, void* mi) {
+    if (g_feature1.load(std::memory_order_acquire)) return true;
+    return o_IsRemoveAds ? o_IsRemoveAds(_this, mi) : false;
+}
+bool h_ShowInterstitialAds(void* _this, void* mi) {
+    if (g_feature1.load(std::memory_order_acquire)) return false;
+    return o_ShowInterstitialAds ? o_ShowInterstitialAds(_this, mi) : false;
+}
+bool h_ShowBannerAds(void* _this, void* mi) {
+    if (g_feature1.load(std::memory_order_acquire)) return false;
+    return o_ShowBannerAds ? o_ShowBannerAds(_this, mi) : false;
+}
+
+// ==========================================
+// Đóng băng tài nguyên — LocalSave.Modify_* hooks
+// Bỏ qua khi ModifyCurrencyType == eSpend (0) hoặc key < 0
+// ==========================================
+typedef void (*t_Modify5)(void*, int64_t, int, bool, int, int, void*);
+t_Modify5 o_ModifyGold    = nullptr;
+t_Modify5 o_ModifyDiamond = nullptr;
+t_Modify5 o_ModifyIvory   = nullptr;
+
+void h_ModifyGold(void* _this, int64_t gold, int type, bool upui, int ctx, int item, void* mi) {
+    if (g_feature2.load(std::memory_order_acquire) && type == 0) return;
+    if (o_ModifyGold) o_ModifyGold(_this, gold, type, upui, ctx, item, mi);
+}
+void h_ModifyDiamond(void* _this, int64_t diamond, int type, bool upui, int ctx, int item, void* mi) {
+    if (g_feature2.load(std::memory_order_acquire) && type == 0) return;
+    if (o_ModifyDiamond) o_ModifyDiamond(_this, diamond, type, upui, ctx, item, mi);
+}
+void h_ModifyIvory(void* _this, int64_t amount, int type, bool upui, int ctx, int item, void* mi) {
+    if (g_feature2.load(std::memory_order_acquire) && type == 0) return;
+    if (o_ModifyIvory) o_ModifyIvory(_this, amount, type, upui, ctx, item, mi);
+}
+
+typedef void (*t_ModifyKey)(void*, int64_t, bool, int, int, void*);
+t_ModifyKey o_ModifyKey = nullptr;
+
+void h_ModifyKey(void* _this, int64_t key, bool over, int ctx, int item, void* mi) {
+    if (g_feature2.load(std::memory_order_acquire) && key < 0) return;
+    if (o_ModifyKey) o_ModifyKey(_this, key, over, ctx, item, mi);
+}
+
+//==========================================
+// ParseMenuConfig — đọc tối đa 7 fields từ HAMOD
+// index 0: Free Shop | index 1: Bỏ QC | index 2: Đóng băng
+// ==========================================
+static bool ParseMenuConfig(const char* text, bool* shop, bool* noads, bool* freeze,
+                            unsigned* field_count) {
+    if (!text || !shop || !noads || !freeze || !field_count) return false;
     float values[7] = {}; unsigned count = 0;
     const char* cursor = text;
     while (true) {
@@ -500,9 +562,12 @@ static bool ParseMenuConfig(const char* text, bool* shop, unsigned* field_count)
         values[count++] = value;
         cursor = end;
     }
-    if ((count != 1 && count != 7) ||
-        (values[0] != 0.0f && values[0] != 1.0f)) return false;
+    if (count < 1 || count > 7) return false;
+    for (unsigned i = 0; i < count; ++i)
+        if (values[i] != 0.0f && values[i] != 1.0f) return false;
     *shop        = values[0] == 1.0f;
+    *noads       = count >= 2 && values[1] == 1.0f;
+    *freeze      = count >= 3 && values[2] == 1.0f;
     *field_count = count;
     return true;
 }
@@ -541,7 +606,7 @@ void* Doc_Config_Ngam(void*) {
     for (size_t i = 0; i < path_count; ++i) LOGI("CONFIG candidate[%zu]=%s", i, paths[i]);
 
     int last_status = -1, last_path = -1;
-    bool last_shop = false;
+    bool last_shop = false, last_noads = false, last_freeze = false;
     while (true) {
         FILE* file = nullptr; int selected = -1;
         for (size_t i = 0; i < path_count; ++i) {
@@ -557,19 +622,23 @@ void* Doc_Config_Ngam(void*) {
         const size_t length = fread(text, 1, sizeof(text) - 1, file);
         const bool read_ok = !ferror(file) && length < sizeof(text) - 1;
         fclose(file);
-        bool shop = false; unsigned field_count = 0;
+        bool shop = false, noads = false, freeze = false; unsigned field_count = 0;
         if (!read_ok || memchr(text, '\0', length) ||
-            !ParseMenuConfig(text, &shop, &field_count)) {
+            !ParseMenuConfig(text, &shop, &noads, &freeze, &field_count)) {
             if (last_status != 1 || last_path != selected)
-                LOGE("CONFIG invalid: path=%s expected 1/7 fields", paths[selected]);
+                LOGE("CONFIG invalid: path=%s expected 1-7 fields", paths[selected]);
             last_status = 1; last_path = selected; usleep(500000); continue;
         }
         g_config_loaded_once.store(true, std::memory_order_release);
-        g_feature0.store(shop, std::memory_order_release);
-        if (last_status != 2 || last_path != selected || last_shop != shop)
-            LOGI("CONFIG applied: path=%s shop=%d fields=%u",
-                 paths[selected], shop, field_count);
-        last_status = 2; last_path = selected; last_shop = shop;
+        g_feature0.store(shop,   std::memory_order_release);
+        g_feature1.store(noads,  std::memory_order_release);
+        g_feature2.store(freeze, std::memory_order_release);
+        if (last_status != 2 || last_path != selected ||
+            last_shop != shop || last_noads != noads || last_freeze != freeze)
+            LOGI("CONFIG applied: path=%s shop=%d noads=%d freeze=%d fields=%u",
+                 paths[selected], shop, noads, freeze, field_count);
+        last_status = 2; last_path = selected;
+        last_shop = shop; last_noads = noads; last_freeze = freeze;
         usleep(500000);
     }
     return nullptr;
@@ -669,6 +738,57 @@ void* h_t(void*) {
         installed += DoHook((void*)g_addr_HandleFail,
                             (void*)h_HandlePurchaseFailure, (void**)&o_HandlePurchaseFailure,
                             "HandlePurchaseFailure");
+
+    // Bỏ quảng cáo
+    g_addr_IsRemoveAds     = Tim_Ham(OBFUSCATE("com.F4A.MobileThird"), OBFUSCATE("AdsManager"),
+                                     OBFUSCATE("IsRemoveAds"), 0);
+    g_addr_ShowInterstitial= Tim_Ham(OBFUSCATE("com.F4A.MobileThird"), OBFUSCATE("AdsManager"),
+                                     OBFUSCATE("ShowInterstitialAds"), 0);
+    g_addr_ShowBanner      = Tim_Ham(OBFUSCATE("com.F4A.MobileThird"), OBFUSCATE("AdsManager"),
+                                     OBFUSCATE("ShowBannerAds"), 0);
+    LOGI("[%s] PHASE2 ads:", BUILD_ID);
+    LOGI("  IsRemoveAds:      0x%" PRIxPTR, g_addr_IsRemoveAds);
+    LOGI("  ShowInterstitial: 0x%" PRIxPTR, g_addr_ShowInterstitial);
+    LOGI("  ShowBanner:       0x%" PRIxPTR, g_addr_ShowBanner);
+
+    if (g_addr_IsRemoveAds)
+        installed += DoHook((void*)g_addr_IsRemoveAds,
+                            (void*)h_IsRemoveAds, (void**)&o_IsRemoveAds, "IsRemoveAds");
+    if (g_addr_ShowInterstitial)
+        installed += DoHook((void*)g_addr_ShowInterstitial,
+                            (void*)h_ShowInterstitialAds, (void**)&o_ShowInterstitialAds,
+                            "ShowInterstitialAds");
+    if (g_addr_ShowBanner)
+        installed += DoHook((void*)g_addr_ShowBanner,
+                            (void*)h_ShowBannerAds, (void**)&o_ShowBannerAds, "ShowBannerAds");
+
+    // Đóng băng tài nguyên
+    g_addr_ModifyGold     = Tim_Ham(OBFUSCATE(""), OBFUSCATE("LocalSave"),
+                                    OBFUSCATE("Modify_Gold"), 5);
+    g_addr_ModifyDiamond  = Tim_Ham(OBFUSCATE(""), OBFUSCATE("LocalSave"),
+                                    OBFUSCATE("Modify_Diamond"), 5);
+    g_addr_ModifyIvory    = Tim_Ham(OBFUSCATE(""), OBFUSCATE("LocalSave"),
+                                    OBFUSCATE("Modify_Ivory"), 5);
+    g_addr_ModifyKey      = Tim_Ham(OBFUSCATE(""), OBFUSCATE("LocalSave"),
+                                    OBFUSCATE("Modify_Key"), 4);
+    LOGI("[%s] PHASE2 freeze:", BUILD_ID);
+    LOGI("  ModifyGold:    0x%" PRIxPTR, g_addr_ModifyGold);
+    LOGI("  ModifyDiamond: 0x%" PRIxPTR, g_addr_ModifyDiamond);
+    LOGI("  ModifyIvory:   0x%" PRIxPTR, g_addr_ModifyIvory);
+    LOGI("  ModifyKey:     0x%" PRIxPTR, g_addr_ModifyKey);
+
+    if (g_addr_ModifyGold)
+        installed += DoHook((void*)g_addr_ModifyGold,
+                            (void*)h_ModifyGold, (void**)&o_ModifyGold, "Modify_Gold");
+    if (g_addr_ModifyDiamond)
+        installed += DoHook((void*)g_addr_ModifyDiamond,
+                            (void*)h_ModifyDiamond, (void**)&o_ModifyDiamond, "Modify_Diamond");
+    if (g_addr_ModifyIvory)
+        installed += DoHook((void*)g_addr_ModifyIvory,
+                            (void*)h_ModifyIvory, (void**)&o_ModifyIvory, "Modify_Ivory");
+    if (g_addr_ModifyKey)
+        installed += DoHook((void*)g_addr_ModifyKey,
+                            (void*)h_ModifyKey, (void**)&o_ModifyKey, "Modify_Key");
 
     LOGI("[%s] HOOK DONE: %u installed", BUILD_ID, installed);
     if (il2cpp_thread_detach) il2cpp_thread_detach(thread);
