@@ -588,10 +588,48 @@ void* h_t(void*) {
         return nullptr;
     }
 
-    // Chờ assemblies stable (5 tick liên tiếp không đổi)
-    size_t last = 0; int stable = 0;
     void* domain = il2cpp_domain_get();
     void* thread = (domain && il2cpp_thread_attach) ? il2cpp_thread_attach(domain) : nullptr;
+
+    // ==========================================
+    // PHA 1 — NGAY SAU InitIl2cpp (không chờ stable)
+    // Anti-cheat phải bị bịt sớm nhất có thể,
+    // trước khi game kịp gọi CheckAutoBan/TriggerCheatCode
+    // ==========================================
+    g_addr_AntiTrigger  = Tim_Ham(OBFUSCATE(""), OBFUSCATE("AntiCheatData"),
+                                  OBFUSCATE("TriggerCheatCode"), 1);
+    g_addr_AntiAutoban  = Tim_Ham(OBFUSCATE(""), OBFUSCATE("AntiCheatData"),
+                                  OBFUSCATE("CheckAutoBan"), 1);
+    g_addr_ReportGrant  = Tim_Ham(OBFUSCATE(""), OBFUSCATE("PurchaseManager"),
+                                  OBFUSCATE("ReportUnauthorizedGrant"), 1);
+    g_addr_RefuseUnlock = Tim_Ham(OBFUSCATE(""), OBFUSCATE("PurchaseManager"),
+                                  OBFUSCATE("RefuseUnlock"), 1);
+    g_addr_HasAnyCheat  = Tim_Ham(OBFUSCATE(""), OBFUSCATE("AntiCheatData"),
+                                  OBFUSCATE("HasAnyCheat"), 0);
+
+    LOGI("[%s] PHASE1 anti-cheat:", BUILD_ID);
+    LOGI("  AntiTrigger:  0x%" PRIxPTR, g_addr_AntiTrigger);
+    LOGI("  AntiAutoban:  0x%" PRIxPTR, g_addr_AntiAutoban);
+    LOGI("  ReportGrant:  0x%" PRIxPTR, g_addr_ReportGrant);
+    LOGI("  RefuseUnlock: 0x%" PRIxPTR, g_addr_RefuseUnlock);
+    LOGI("  HasAnyCheat:  0x%" PRIxPTR, g_addr_HasAnyCheat);
+
+    if (g_addr_AntiTrigger)  oni_patch_at(g_addr_AntiTrigger,  0xD65F03C0);
+    if (g_addr_AntiAutoban)  oni_patch_at(g_addr_AntiAutoban,  0xD65F03C0);
+    if (g_addr_ReportGrant)  oni_patch_at(g_addr_ReportGrant,  0xD65F03C0);
+    if (g_addr_RefuseUnlock) oni_patch_at(g_addr_RefuseUnlock, 0xD65F03C0);
+
+    unsigned installed = 0;
+    if (g_addr_HasAnyCheat)
+        installed += DoHook((void*)g_addr_HasAnyCheat,
+                            (void*)h_HasAnyCheat, (void**)&o_HasAnyCheat,
+                            "HasAnyCheat");
+    LOGI("[%s] PHASE1 done", BUILD_ID);
+
+    // ==========================================
+    // PHA 2 — Chờ assemblies stable rồi hook Free Shop
+    // ==========================================
+    size_t last = 0; int stable = 0;
     for (int i = 0; i < 60 && stable < 5; ++i) {
         sleep(1);
         size_t count = 0;
@@ -605,19 +643,24 @@ void* h_t(void*) {
     }
     LOGI("Assemblies stable: %zu", last);
 
-    // Tìm tất cả địa chỉ tại runtime (không cần offset cứng)
-    if (!ResolveAllMethods())
-        LOGE("[%s] Some critical methods missing — partial functionality", BUILD_ID);
+    // Tìm phần còn lại (Free Shop)
+    g_addr_BuyProduct   = Tim_Ham(OBFUSCATE("com.F4A.MobileThird"), OBFUSCATE("IAPManager"),
+                                  OBFUSCATE("BuyProductByID"), 1);
+    g_addr_GetInstance  = Tim_Ham(OBFUSCATE(""), OBFUSCATE("PurchaseManager"),
+                                  OBFUSCATE("get_Instance"), 0);
+    g_addr_Send         = Tim_Ham_Send_String();
+    g_addr_SetProgress  = Tim_Ham(OBFUSCATE(""), OBFUSCATE("PurchaseManager"),
+                                  OBFUSCATE("SetProgress"), 1);
+    g_addr_HandleFail   = Tim_Ham(OBFUSCATE(""), OBFUSCATE("PurchaseManager"),
+                                  OBFUSCATE("HandlePurchaseFailure"), 2);
 
-    // Bịt mõm anti-cheat bằng RET (ARM64: 0xD65F03C0)
-    if (g_addr_AntiTrigger)  oni_patch_at(g_addr_AntiTrigger,  0xD65F03C0);
-    if (g_addr_AntiAutoban)  oni_patch_at(g_addr_AntiAutoban,  0xD65F03C0);
-    if (g_addr_ReportGrant)  oni_patch_at(g_addr_ReportGrant,  0xD65F03C0);
-    if (g_addr_RefuseUnlock) oni_patch_at(g_addr_RefuseUnlock, 0xD65F03C0);
+    LOGI("[%s] PHASE2 free shop:", BUILD_ID);
+    LOGI("  BuyProduct:  0x%" PRIxPTR, g_addr_BuyProduct);
+    LOGI("  GetInstance: 0x%" PRIxPTR, g_addr_GetInstance);
+    LOGI("  Send:        0x%" PRIxPTR, g_addr_Send);
+    LOGI("  SetProgress: 0x%" PRIxPTR, g_addr_SetProgress);
+    LOGI("  HandleFail:  0x%" PRIxPTR, g_addr_HandleFail);
 
-    unsigned installed = 0;
-
-    // Free Shop (địa chỉ tìm động)
     if (g_addr_BuyProduct)
         installed += DoHook((void*)g_addr_BuyProduct,
                             (void*)h_BuyProductByID, (void**)&o_BuyProductByID,
@@ -626,10 +669,6 @@ void* h_t(void*) {
         installed += DoHook((void*)g_addr_HandleFail,
                             (void*)h_HandlePurchaseFailure, (void**)&o_HandlePurchaseFailure,
                             "HandlePurchaseFailure");
-    if (g_addr_HasAnyCheat)
-        installed += DoHook((void*)g_addr_HasAnyCheat,
-                            (void*)h_HasAnyCheat, (void**)&o_HasAnyCheat,
-                            "HasAnyCheat");
 
     LOGI("[%s] HOOK DONE: %u installed", BUILD_ID, installed);
     if (il2cpp_thread_detach) il2cpp_thread_detach(thread);
