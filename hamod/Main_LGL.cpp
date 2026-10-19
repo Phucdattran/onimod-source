@@ -5,8 +5,7 @@
 //  Tính năng (menu LGL):
 //    [0]    Tang Sat Thuong — damage toggle
 //    [1]    He So Sat Thuong — InputValue (gõ số bất kỳ, tối đa 9999999)
-//    [2]    Toc Do Tran — Spinner x1/x2/x3/x5 (hook Time.get_deltaTime)
-//    [3]    Bat Tu (God Mode) — calModifiedDamage trả 0 cho phe mình là target
+//    [2]    Bat Tu (God Mode) — calModifiedDamage trả 0 cho phe mình là target
 // ============================================================
 
 #define LOG_TAG      "BXZYVN_MOD"
@@ -265,8 +264,6 @@ static bool DoHook(void* addr, void* hook, void** orig, const char* name) {
 static bool  g_dmg     = false;
 static int   g_dmgmul  = 1;
 static bool  g_god     = false;
-static bool  g_spd     = false;
-static int   g_spdmul  = 1;
 
 // Lua runtime patch (package.loaded: calModifiedDamage + setCurHp)
 typedef int (*lua_pcall_t)(void*, int, int, int);
@@ -402,30 +399,6 @@ static int h_lua_pcall(void* L, int nargs, int nresults, int msgh) {
     return o_lua_pcall ? o_lua_pcall(L, nargs, nresults, msgh) : 0;
 }
 
-// ═══════════════════════════════════════════════════════════
-//  6. HOOK: Time.set_timeScale + Time.get_timeScale — Tốc độ trận
-//  set: nhân speed factor; get: trả giá trị game đặt để tránh nhân dồn
-// ═══════════════════════════════════════════════════════════
-typedef void  (*set_timeScale_t)(float, void*);
-typedef float (*get_timeScale_t)(void*);
-static set_timeScale_t o_set_timeScale = nullptr;
-static get_timeScale_t o_get_timeScale = nullptr;
-static float g_game_timescale = 1.0f;
-static void* g_timescale_mi   = nullptr;
-
-static void h_set_timeScale(float value, void* mi) {
-    T_COUNT(set_timeScale);
-    g_game_timescale = value;
-    if (!g_timescale_mi) g_timescale_mi = mi;
-    float actual = (g_spd && g_spdmul > 1) ? value * g_spdmul : value;
-    LOGI("TimeScale: game=%.2f actual=%.2f", value, actual);
-    if (o_set_timeScale) o_set_timeScale(actual, mi);
-}
-static float h_get_timeScale(void* mi) {
-    T_COUNT(get_timeScale);
-    return g_game_timescale;
-}
-
 // thread thử lại hook luaL_loadbufferx + lua_pcall — chạy vô hạn cho đến khi tìm được
 // libxlua.so chỉ nạp khi vào trận nên không giới hạn thời gian chờ
 static void* lua_retry_thread(void*) {
@@ -501,10 +474,6 @@ static void ResolveAll() {
         }
     }
 
-    // [2] Speed — Time.set/get_timeScale
-    T_HOOK("UnityEngine", "Time", "set_timeScale", 1, set_timeScale);
-    T_HOOK("UnityEngine", "Time", "get_timeScale", 0, get_timeScale);
-
     TraceReport();
     LOGI("=== Resolve DONE ===");
 }
@@ -517,8 +486,7 @@ jobjectArray GetFeatureList(JNIEnv* env, jobject) {
         OBFUSCATE("Category_" GAME_NAME),
         OBFUSCATE("0_Toggle_Tang Sat Thuong"),
         OBFUSCATE("1_InputValue_He So Sat Thuong"),
-        OBFUSCATE("2_Spinner_Toc Do Tran_x1,x2,x3,x5"),
-        OBFUSCATE("3_Toggle_Bat Tu (God Mode)"),
+        OBFUSCATE("2_Toggle_Bat Tu (God Mode)"),
     };
     int total = sizeof(features) / sizeof(features[0]);
     jobjectArray ret = env->NewObjectArray(
@@ -535,7 +503,6 @@ void Changes(JNIEnv* env, jclass, jobject,
              jint featNum, jstring featName, jint value, jboolean boolean, jstring str) {
     T_STEP("bam tinh nang so %d (value=%d, bat=%d)", featNum, value, boolean);
     LOGI("Menu: tinh nang %d -> value=%d bat=%d", featNum, value, boolean);
-    static const int spd_table[] = {1, 2, 3, 5};
     switch (featNum) {
         case 0:
             g_dmg = boolean;
@@ -549,16 +516,7 @@ void Changes(JNIEnv* env, jclass, jobject,
             g_patch_needed = 1;
             break;
         }
-        case 2: {
-            int idx = (value < 0) ? 0 : (value > 3 ? 3 : value);
-            g_spdmul = spd_table[idx];
-            g_spd = (g_spdmul > 1);
-            LOGI("Speed: x%d (idx=%d)", g_spdmul, idx);
-            if (o_set_timeScale && g_timescale_mi)
-                o_set_timeScale(g_game_timescale * (g_spd ? g_spdmul : 1), g_timescale_mi);
-            break;
-        }
-        case 3:
+        case 2:
             g_god = boolean;
             LOGI("God Mode: %s", g_god ? "BAT" : "TAT");
             g_patch_needed = 1;
