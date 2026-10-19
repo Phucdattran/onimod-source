@@ -28,6 +28,7 @@
 #include <elf.h>
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <sys/mman.h>
 #include <android/log.h>
 
 #include "Includes/obfuscate.h"
@@ -266,16 +267,42 @@ typedef int (*luaL_loadbufferx_t)(void* L, const char* buff, size_t sz, const ch
 static luaL_loadbufferx_t o_luaL_loadbufferx = nullptr;
 static volatile unsigned g_lua_seq = 0;
 
-// Trả về buffer đã patch (cấp phát mới) hoặc nullptr nếu không cần patch
+// Tìm text pattern trong Lua source (memmem), insert dòng nhân damage
+// Trả về buffer mới (mmap) hoặc nullptr nếu không tìm thấy
+// Pattern xác nhận từ libonavhtny.so offset 0x1f17:
+//   "function M.calModifiedDamage(instigator, target, damage)\r\n"
 static const char* lua_patch_dmg(const char* buff, size_t sz, size_t* out_sz, const char* name) {
-    // TODO: sau khi dump và phân tích script, điền pattern Lua bytecode ở đây
-    // Cơ chế: tìm opcode LOADK/MUL trong bytecode liên quan đến tính damage,
-    // nhân constant với g_dmgmul.
-    // Ví dụ (placeholder):
-    //   uint8_t* p = (uint8_t*)mmap(...); memcpy(p, buff, sz);
-    //   tìm pattern, patch hệ số; *out_sz = sz; return (char*)p;
-    (void)buff; (void)sz; (void)out_sz; (void)name;
-    return nullptr;
+    static const char NEEDLE_CRLF[] = "function M.calModifiedDamage(instigator, target, damage)\r\n";
+    static const char NEEDLE_LF[]   = "function M.calModifiedDamage(instigator, target, damage)\n";
+
+    const char* found = nullptr;
+    size_t needle_len = 0;
+    if ((found = (const char*)memmem(buff, sz, NEEDLE_CRLF, sizeof(NEEDLE_CRLF)-1)))
+        needle_len = sizeof(NEEDLE_CRLF)-1;
+    else if ((found = (const char*)memmem(buff, sz, NEEDLE_LF, sizeof(NEEDLE_LF)-1)))
+        needle_len = sizeof(NEEDLE_LF)-1;
+
+    if (!found) return nullptr;
+
+    // Chèn "    damage = damage * N;\r\n" ngay sau dòng khai báo hàm
+    char inject[64];
+    int injlen = snprintf(inject, sizeof(inject), "    damage = damage * %d;\r\n", g_dmgmul);
+
+    size_t new_sz = sz + (size_t)injlen;
+    void* p = mmap(nullptr, new_sz, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (p == MAP_FAILED) return nullptr;
+
+    const char* fn_end = found + needle_len;
+    size_t head = (size_t)(fn_end - buff);
+    memcpy((char*)p,            buff,   head);
+    memcpy((char*)p + head,     inject, (size_t)injlen);
+    memcpy((char*)p + head + (size_t)injlen, fn_end, sz - head);
+
+    mprotect(p, new_sz, PROT_READ);
+    *out_sz = new_sz;
+    LOGI("[Dmg] patch M.calModifiedDamage x%d trong '%s' (%zu->%zu byte)",
+         g_dmgmul, name ? name : "?", sz, new_sz);
+    return (const char*)p;
 }
 
 static int h_luaL_loadbufferx(void* L, const char* buff, size_t sz, const char* name, const char* mode) {
