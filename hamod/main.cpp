@@ -233,20 +233,25 @@ static void ApplyRuntimePatch(void* L) {
 }
 
 // ─── Hooks ──────────────────────────────────────────────────────────────────
+// Số lần lua_pcall đầu tiên tự động thử patch (bao phủ mọi Lua state sau khi inject).
+// HAMOD inject sau khi game đã chạy → state battle có thể không phải state đầu tiên.
+static std::atomic<int> g_patch_attempts{0};
+
 static int h_luaL_loadbufferx(void* L, const char* buff, size_t sz, const char* name, const char* mode) {
     if (L) g_lua_state = L;
-    static std::atomic<int> s_cnt{0};
-    if (s_cnt.fetch_add(1, std::memory_order_relaxed) < 5)
-        g_patch_needed.store(1, std::memory_order_release);
+    // Script mới load → có thể là state battle → cờ kích hoạt patch
+    g_patch_needed.store(1, std::memory_order_release);
     return o_luaL_loadbufferx ? o_luaL_loadbufferx(L, buff, sz, name, mode) : 0;
 }
 
 static int h_lua_pcall(void* L, int nargs, int nresults, int msgh) {
     if (L) g_lua_state = L;
-    if (g_patch_needed.load(std::memory_order_acquire) &&
-        !g_in_patch.load(std::memory_order_acquire)) {
+    bool want = g_patch_needed.exchange(0, std::memory_order_acq_rel);
+    int att = g_patch_attempts.load(std::memory_order_relaxed);
+    // Retry 200 lần đầu (đảm bảo hit đúng battle state) + mỗi khi config đổi
+    if ((want || att < 200) && !g_in_patch.load(std::memory_order_acquire)) {
+        if (att < 200) g_patch_attempts.fetch_add(1, std::memory_order_relaxed);
         ApplyRuntimePatch(L);
-        g_patch_needed.store(0, std::memory_order_release);
     }
     return o_lua_pcall ? o_lua_pcall(L, nargs, nresults, msgh) : 0;
 }
