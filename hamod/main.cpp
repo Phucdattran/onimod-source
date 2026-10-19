@@ -27,7 +27,7 @@
 
 #define BUILD_ID   "ONI_MOD"
 #define LOG_TAG    "OniHamod"
-#define PKG_NAME   "com.your.game.package"
+#define PKG_NAME   "com.bxzyvn.gg"
 #define NS_MAIN    ""   // namespace C# — để "" nếu không có
 
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
