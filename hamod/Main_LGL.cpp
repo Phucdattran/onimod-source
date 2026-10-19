@@ -296,11 +296,12 @@ static luaL_loadbufferx_t o_luaL_loadbufferx = nullptr;
 // Dùng outer pcall để absorb mọi lỗi runtime
 static void ApplyRuntimePatch(void* L) {
     if (!o_lua_pcall || !o_luaL_loadbufferx) return;
-    char code[2048];
+    char code[3000];
     snprintf(code, sizeof(code),
         "pcall(function()\n"
         "  DU_lgl_mul=%d\n"
         "  DU_lgl_god=%s\n"
+        "  DU_lgl_spd=%d\n"
         "  if not DU_lgl_orig then\n"
         "    local DU=nil\n"
         "    for _,v in pairs(package.loaded) do\n"
@@ -314,6 +315,16 @@ static void ApplyRuntimePatch(void* L) {
         "        local m=DU_lgl_mul\n"
         "        if m and m>1 and i and i.camp==EPlayerCamp.Attacker then return r*m end\n"
         "        return r\n"
+        "      end\n"
+        "    end\n"
+        "  end\n"
+        "  if not SM_lgl_orig then\n"
+        "    local SM=package.loaded['Battle.Sce.SceneManager']\n"
+        "    if SM and SM.update then\n"
+        "      SM_lgl_orig=SM.update\n"
+        "      SM.update=function(self,dt,...)\n"
+        "        local s=DU_lgl_spd\n"
+        "        return SM_lgl_orig(self,(s and s>1) and dt*s or dt,...)\n"
         "      end\n"
         "    end\n"
         "  end\n"
@@ -335,7 +346,7 @@ static void ApplyRuntimePatch(void* L) {
         "    end)\n"
         "  end\n"
         "end)\n",
-        g_dmg ? g_dmgmul : 1, g_god ? "true" : "false"
+        g_dmg ? g_dmgmul : 1, g_god ? "true" : "false", g_spdmul
     );
     int r1 = o_luaL_loadbufferx(L, code, strlen(code), "@lgl_patch", nullptr);
     if (r1 != 0) { LOGE("[Patch] compile FAIL r=%d", r1); return; }
@@ -400,20 +411,6 @@ static int h_lua_pcall(void* L, int nargs, int nresults, int msgh) {
         }
     }
     return o_lua_pcall ? o_lua_pcall(L, nargs, nresults, msgh) : 0;
-}
-
-// ═══════════════════════════════════════════════════════════
-//  6. HOOK: Time.get_deltaTime — Tốc độ trận
-//  Nhân deltaTime → Lua SceneManager chạy nhiều tick hơn mỗi frame
-//  dump.cs: public static System.Single get_deltaTime()
-// ═══════════════════════════════════════════════════════════
-typedef float (*get_deltaTime_t)(void*);
-static get_deltaTime_t o_get_deltaTime = nullptr;
-
-static float h_get_deltaTime(void* mi) {
-    T_COUNT(get_deltaTime);
-    float dt = o_get_deltaTime ? o_get_deltaTime(mi) : 0.016f;
-    return (g_spd && g_spdmul > 1) ? dt * g_spdmul : dt;
 }
 
 // thread thử lại hook luaL_loadbufferx + lua_pcall — chạy vô hạn cho đến khi tìm được
@@ -491,9 +488,6 @@ static void ResolveAll() {
         }
     }
 
-    // [2] Speed — Time.get_deltaTime (UnityEngine)
-    T_HOOK("UnityEngine", "Time", "get_deltaTime", 0, get_deltaTime);
-
     TraceReport();
     LOGI("=== Resolve DONE ===");
 }
@@ -543,6 +537,7 @@ void Changes(JNIEnv* env, jclass, jobject,
             g_spdmul = spd_table[idx];
             g_spd = (g_spdmul > 1);
             LOGI("Speed: x%d (idx=%d)", g_spdmul, idx);
+            g_patch_needed = 1;
             break;
         }
         case 3:
