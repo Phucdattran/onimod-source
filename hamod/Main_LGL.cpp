@@ -5,8 +5,8 @@
 //  Tính năng (menu LGL):
 //    [AUTO] Dump Lua — tự dump mọi script vào LGL_logs/bxzyvn_lua/ (không cần toggle)
 //    [0]    Tang Sat Thuong — damage toggle
-//    [1]    He So Sat Thuong — seekbar 1-20
-//    [2]    Bat Tu (God Mode) — PatcherInfo.preRelease (+0x30) = true
+//    [1]    He So Sat Thuong — seekbar 1-20 (runtime patch: calModifiedDamage trong Lua)
+//    [2]    Bat Tu (God Mode) — setCurHp patch (PlayerData Lua) + PatcherInfo.preRelease (IL2CPP)
 //    [3]    GM Mode — KCommand::Exec
 // ============================================================
 
@@ -269,56 +269,87 @@ static bool  g_god     = false;
 static bool  g_gm      = false;
 static bool  g_nodebug = false;
 
+// Lua runtime patch (package.loaded: calModifiedDamage + setCurHp)
+typedef int (*lua_pcall_t)(void*, int, int, int);
+static lua_pcall_t  f_lua_pcall    = nullptr;
+static void*        g_L            = nullptr;   // Lua state, lưu khi hook lần đầu
+static bool         g_dmg_seen     = false;     // DamageUtil.lua đã qua hook
+static int          g_patch_try    = 0;         // số lần thử install (tối đa 3)
+static volatile int g_patch_needed = 0;         // 1 = cần re-apply (set bởi Changes)
+
 // ═══════════════════════════════════════════════════════════
-//  5. HOOK: luaL_loadbufferx — dump + damage patch
-//  Khi g_dump = true: ghi chunk ra file
-//  Khi g_dmg = true và g_dmgmul > 1: patch damage trong Lua bytecode
-//  (Pattern cụ thể sẽ điền sau khi phân tích file .luac đã dump)
+//  5. HOOK: luaL_loadbufferx — dump Lua + runtime patch
+//
+//  Runtime patch strategy (report xác nhận DamageUtil load lúc startup):
+//  - Sau khi DamageUtil thấy qua hook, inject Lua code vào Lua state
+//    bằng o_luaL_loadbufferx + f_lua_pcall để:
+//      a) Wrap calModifiedDamage trong package.loaded (DamageUtil module)
+//         → DU_lgl_mul: nhân damage mỗi lần game gọi
+//      b) Wrap setCurHp trong PlayerData module
+//         → PD_lgl_god: block HP giảm khi god mode bật
+//  - Wrap dùng Lua globals (DU_lgl_mul, PD_lgl_god) → thay đổi từ
+//    Changes() bằng cách set g_patch_needed=1 và update khi Lua call tiếp theo
 // ═══════════════════════════════════════════════════════════
 typedef int (*luaL_loadbufferx_t)(void* L, const char* buff, size_t sz, const char* name, const char* mode);
 static luaL_loadbufferx_t o_luaL_loadbufferx = nullptr;
 
-// Patch hàm M.calModifiedDamage trong Lua: nhân damage
-// Pattern từ libonavhtny.so — file này chỉ load khi VÀO TRẬN (không phải lobby)
-// → chèn "    damage = damage * N;\r\n" ngay sau dòng khai báo hàm
-static const char* lua_patch_dmg(const char* buff, size_t sz, size_t* out_sz, const char* name) {
-    static const char NEEDLE_CRLF[] = "function M.calModifiedDamage(instigator, target, damage)\r\n";
-    static const char NEEDLE_LF[]   = "function M.calModifiedDamage(instigator, target, damage)\n";
-
-    const char* found = nullptr;
-    size_t needle_len = 0;
-    if ((found = (const char*)memmem(buff, sz, NEEDLE_CRLF, sizeof(NEEDLE_CRLF)-1)))
-        needle_len = sizeof(NEEDLE_CRLF)-1;
-    else if ((found = (const char*)memmem(buff, sz, NEEDLE_LF, sizeof(NEEDLE_LF)-1)))
-        needle_len = sizeof(NEEDLE_LF)-1;
-
-    if (!found) return nullptr;
-
-    char inject[64];
-    int injlen = snprintf(inject, sizeof(inject), "    damage = damage * %d;\r\n", g_dmgmul);
-
-    size_t new_sz = sz + (size_t)injlen;
-    void* p = mmap(nullptr, new_sz, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (p == MAP_FAILED) return nullptr;
-
-    const char* fn_end = found + needle_len;
-    size_t head = (size_t)(fn_end - buff);
-    memcpy((char*)p,                              buff,   head);
-    memcpy((char*)p + head,                       inject, (size_t)injlen);
-    memcpy((char*)p + head + (size_t)injlen,      fn_end, sz - head);
-
-    mprotect(p, new_sz, PROT_READ);
-    *out_sz = new_sz;
-    LOGI("[Dmg] patch M.calModifiedDamage x%d trong '%s' (%zu->%zu byte)",
-         g_dmgmul, name ? name : "?", sz, new_sz);
-    return (const char*)p;
+// Inject Lua code vào Lua state để patch calModifiedDamage và setCurHp
+// Gọi TRƯỚC o_luaL_loadbufferx cho game script → stack clean khi gọi
+// Dùng outer pcall để absorb mọi lỗi runtime → stack luôn về 0 sau pcall
+static void ApplyRuntimePatch(void* L) {
+    if (!f_lua_pcall || !o_luaL_loadbufferx) return;
+    char code[2048];
+    snprintf(code, sizeof(code),
+        "pcall(function()\n"
+        "  if not DU_lgl_orig then\n"
+        "    local DU=nil\n"
+        "    for _,v in pairs(package.loaded) do\n"
+        "      if type(v)=='table' and type(v.calModifiedDamage)=='function' then DU=v;break end\n"
+        "    end\n"
+        "    if DU then\n"
+        "      DU_lgl_orig=DU.calModifiedDamage;DU_lgl_mul=%d\n"
+        "      DU.calModifiedDamage=function(i,t,d)\n"
+        "        local r=DU_lgl_orig(i,t,d)\n"
+        "        local m=DU_lgl_mul;if m and m>1 then return r*m end;return r\n"
+        "      end\n"
+        "    end\n"
+        "  else DU_lgl_mul=%d end\n"
+        "  if not PD_lgl_patched then\n"
+        "    local PD=nil\n"
+        "    for _,v in pairs(package.loaded) do\n"
+        "      if type(v)=='table' and type(v.setCurHp)=='function'\n"
+        "      and type(v.checkInvincible)=='function' then PD=v;break end\n"
+        "    end\n"
+        "    if PD then\n"
+        "      PD_lgl_patched=true\n"
+        "      local o=PD.setCurHp\n"
+        "      PD.setCurHp=function(self,hp,d)\n"
+        "        if PD_lgl_god then\n"
+        "          local ok,cur=pcall(self.getAttrVal,self,Battle.AttrEnum.CurHp)\n"
+        "          if ok and cur and hp<cur then return end\n"
+        "        end\n"
+        "        return o(self,hp,d)\n"
+        "      end\n"
+        "    end\n"
+        "  end\n"
+        "  PD_lgl_god=%s\n"
+        "end)\n",
+        g_dmgmul, g_dmgmul, g_god ? "true" : "false"
+    );
+    int r1 = o_luaL_loadbufferx(L, code, strlen(code), "@lgl_patch", nullptr);
+    if (r1 != 0) { LOGE("[Patch] compile FAIL r=%d (bug trong template)", r1); return; }
+    f_lua_pcall(L, 0, 0, 0);
+    LOGI("[Patch] inject OK: dmg x%d god=%d", g_dmgmul, g_god);
 }
 
 static int h_luaL_loadbufferx(void* L, const char* buff, size_t sz, const char* name, const char* mode) {
     T_COUNT(luaL_loadbufferx);
     if (!buff || sz == 0) goto call_orig;
 
-    // Auto-dump mọi script (không cần toggle); O_EXCL = chỉ ghi lần đầu, bỏ qua nếu đã có
+    // Lưu Lua state
+    if (!g_L) g_L = L;
+
+    // Auto-dump mọi script (O_EXCL = chỉ ghi lần đầu)
     {
         static bool dir_made = false;
         if (!dir_made) {
@@ -337,21 +368,24 @@ static int h_luaL_loadbufferx(void* L, const char* buff, size_t sz, const char* 
         }
         safe[si] = 0;
         snprintf(path, sizeof(path), "/sdcard/Download/LGL_logs/bxzyvn_lua/%s.lua", safe);
-        int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0644); // O_EXCL: bỏ qua nếu đã dump
-        if (fd >= 0) {
-            write(fd, buff, sz);
-            close(fd);
-            LOGI("[Lua] dump: %s (%zu bytes)", cname, sz);
-        }
+        int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0644);
+        if (fd >= 0) { write(fd, buff, sz); close(fd); }
     }
 
-    if (g_dmgmul > 1) {
-        size_t new_sz = sz;
-        const char* patched = lua_patch_dmg(buff, sz, &new_sz, name);
-        if (patched) {
-            int r = o_luaL_loadbufferx ? o_luaL_loadbufferx(L, patched, new_sz, name, mode) : 0;
-            munmap((void*)patched, new_sz);
-            return r;
+    // Đánh dấu DamageUtil đã thấy
+    if (!g_dmg_seen && name && strstr(name, "DamageUtil"))
+        g_dmg_seen = true;
+
+    // Runtime patch: inject TRƯỚC khi game load script này (stack sạch ở đây)
+    // Thử install tối đa 3 lần sau khi thấy DamageUtil (lần 1 có thể DU chưa execute)
+    // Re-apply khi g_patch_needed=1 (Changes thay đổi settings)
+    if (f_lua_pcall) {
+        bool try_install = g_dmg_seen && (g_patch_try < 3);
+        bool try_update  = (g_patch_needed != 0);
+        if (try_install || try_update) {
+            if (try_install) g_patch_try++;
+            if (try_update)  g_patch_needed = 0;
+            ApplyRuntimePatch(L);
         }
     }
 
@@ -360,9 +394,11 @@ call_orig:
 }
 
 // ═══════════════════════════════════════════════════════════
-//  6. HOOK: PatcherInfo::Get — God Mode
-//  Static method, 0 params → (void* mi) returns PatcherInfo*
-//  Sau khi lấy instance: set field preRelease tại +0x30 = true
+//  6. HOOK: PatcherInfo::Get — God Mode (IL2CPP backup)
+//  Cơ chế god mode CHÍNH: runtime Lua patch setCurHp trong PlayerData
+//  (ApplyRuntimePatch section 5)
+//  Hook này ghi PatcherInfo.preRelease = true — chức năng chưa xác nhận
+//  trong Lua nhưng giữ lại phòng trường hợp có effect native.
 //  dump.cs: public static PatcherInfo Get(); // 0x269C9A8
 //           public System.Boolean preRelease; // 0x30
 // ═══════════════════════════════════════════════════════════
@@ -427,7 +463,7 @@ static bool SendCommand(const char* cmd_utf8) {
     return r;
 }
 
-// thread thử lại hook luaL_loadbufferx (libxlua.so nạp trễ sau ResolveAll)
+// thread thử lại hook luaL_loadbufferx + lua_pcall (libxlua.so nạp trễ sau ResolveAll)
 static void* lua_retry_thread(void*) {
     LOGI("[Lua] libxlua chua nap, thu lai moi 500ms (toi da 30s)...");
     for (int i = 0; i < 60 && !o_luaL_loadbufferx; i++) {
@@ -437,6 +473,10 @@ static void* lua_retry_thread(void*) {
             bool ok = DoHook(sym, (void*)h_luaL_loadbufferx, (void**)&o_luaL_loadbufferx, "luaL_loadbufferx");
             if (ok) { LOGI("[Lua] Hook MUON OK (sau ~%ds)", (i+1)/2); g_hook_ok++; }
             else   { LOGE("[Lua] Hook MUON FAIL");                     g_hook_fail++; }
+            if (!f_lua_pcall) {
+                f_lua_pcall = (lua_pcall_t)FindSymAnywhere("lua_pcall");
+                LOGI("[Lua] lua_pcall: %s", f_lua_pcall ? "OK" : "KHONG THAY");
+            }
             return nullptr;
         }
     }
@@ -456,12 +496,16 @@ static void* lua_retry_thread(void*) {
 static void ResolveAll() {
     LOGI("=== Resolve START ===");
 
-    // [0/1/2] Lua dump + damage — tìm luaL_loadbufferx trong tất cả thư viện
+    // [0/1/2] Lua dump + runtime patch — tìm luaL_loadbufferx + lua_pcall
     {
         void* lua_sym = FindSymAnywhere(OBFUSCATE("luaL_loadbufferx"));
         if (lua_sym) {
             bool ok = DoHook(lua_sym, (void*)h_luaL_loadbufferx, (void**)&o_luaL_loadbufferx, "luaL_loadbufferx");
             if (ok) { g_hook_ok++; } else { g_hook_fail++; }
+            if (!f_lua_pcall) {
+                f_lua_pcall = (lua_pcall_t)FindSymAnywhere(OBFUSCATE("lua_pcall"));
+                LOGI("[Lua] lua_pcall: %s", f_lua_pcall ? "OK" : "KHONG THAY");
+            }
         } else {
             LOGI("[Lua] Chua thay luaL_loadbufferx — lib 'lua' dang nap:");
             dl_iterate_phdr([](struct dl_phdr_info* info, size_t, void*) -> int {
@@ -516,14 +560,18 @@ void Changes(JNIEnv* env, jclass, jobject,
         case 0:
             g_dmg = boolean;
             LOGI("Damage Mod: %s (x%d)", g_dmg ? "BAT" : "TAT", g_dmgmul);
+            // Cập nhật Lua globals khi Lua call tiếp theo (cần Lua thread)
+            g_patch_needed = 1;
             break;
         case 1:
             g_dmgmul = (value < 1) ? 1 : (value > 20 ? 20 : value);
             LOGI("Damage Multiplier: x%d", g_dmgmul);
+            g_patch_needed = 1;
             break;
         case 2:
             g_god = boolean;
             LOGI("God Mode: %s", g_god ? "BAT" : "TAT");
+            g_patch_needed = 1;
             break;
         case 3:
             g_gm = boolean;
