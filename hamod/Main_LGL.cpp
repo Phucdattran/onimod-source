@@ -429,6 +429,29 @@ static bool SendCommand(const char* cmd_utf8) {
     return r;
 }
 
+// thread thử lại hook luaL_loadbufferx (libxlua.so nạp trễ sau ResolveAll)
+static void* lua_retry_thread(void*) {
+    LOGI("[Lua] libxlua chua nap, thu lai moi 500ms (toi da 30s)...");
+    for (int i = 0; i < 60 && !o_luaL_loadbufferx; i++) {
+        usleep(500000);
+        void* sym = FindSymAnywhere("luaL_loadbufferx");
+        if (sym) {
+            bool ok = DoHook(sym, (void*)h_luaL_loadbufferx, (void**)&o_luaL_loadbufferx, "luaL_loadbufferx");
+            if (ok) { LOGI("[Lua] Hook MUON OK (sau ~%ds)", (i+1)/2); g_hook_ok++; }
+            else   { LOGE("[Lua] Hook MUON FAIL");                     g_hook_fail++; }
+            return nullptr;
+        }
+    }
+    if (!o_luaL_loadbufferx) {
+        LOGE("[Lua] Sau 30s van KHONG THAY luaL_loadbufferx — danh sach tat ca lib:");
+        dl_iterate_phdr([](struct dl_phdr_info* info, size_t, void*) -> int {
+            if (info->dlpi_name && *info->dlpi_name) LOGI("[lib] %s", info->dlpi_name);
+            return 0;
+        }, nullptr);
+    }
+    return nullptr;
+}
+
 // ═══════════════════════════════════════════════════════════
 //  9. ResolveAll
 // ═══════════════════════════════════════════════════════════
@@ -442,7 +465,14 @@ static void ResolveAll() {
             bool ok = DoHook(lua_sym, (void*)h_luaL_loadbufferx, (void**)&o_luaL_loadbufferx, "luaL_loadbufferx");
             if (ok) { g_hook_ok++; } else { g_hook_fail++; }
         } else {
-            LOGE("KHONG THAY luaL_loadbufferx — Lua co the la libxlua.so (se thu sau)");
+            LOGI("[Lua] Chua thay luaL_loadbufferx — lib 'lua' dang nap:");
+            dl_iterate_phdr([](struct dl_phdr_info* info, size_t, void*) -> int {
+                if (info->dlpi_name && (strstr(info->dlpi_name, "lua") || strstr(info->dlpi_name, "xlua")))
+                    LOGI("[Lua?] %s", info->dlpi_name);
+                return 0;
+            }, nullptr);
+            pthread_t pt; pthread_create(&pt, nullptr, lua_retry_thread, nullptr); pthread_detach(pt);
+            LOGI("[Lua] Spawn retry thread OK");
         }
     }
 
