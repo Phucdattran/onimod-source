@@ -294,9 +294,10 @@ static int h_luaL_loadbufferx(void* L, const char* buff, size_t size, const char
 
 // ─── Hook: DebugTool::RegisterDebugToolEntry ─────────────────────────────────
 // Chặn debug tool — tắt kênh debug của game.
-typedef void (*RegisterDebugToolEntry_t)(void* _this, void* mi);
+// Instance method, 1 param (Action action)
+typedef void (*RegisterDebugToolEntry_t)(void* _this, void* action, void* mi);
 static RegisterDebugToolEntry_t o_RegisterDebugToolEntry = nullptr;
-static void h_RegisterDebugToolEntry(void* _this, void* mi) {
+static void h_RegisterDebugToolEntry(void* _this, void* action, void* mi) {
     // Không forward → vô hiệu hoá debug entry
     LOGI("[DebugTool] RegisterDebugToolEntry blocked");
 }
@@ -310,12 +311,12 @@ static void h_RegisterExecutor(void* _this, void* executor, void* mi) {
 }
 
 // ─── Hook: KCommand::Exec ────────────────────────────────────────────────────
-// Chặn hoặc inject lệnh KCommand.
-typedef void* (*KExec_t)(void* _this, void* cmd, void* mi);
+// Static method: public static bool Exec(String cmd) — không có _this
+typedef bool (*KExec_t)(void* cmd, void* mi);
 static KExec_t o_KExec = nullptr;
-static void* h_KExec(void* _this, void* cmd, void* mi) {
+static bool h_KExec(void* cmd, void* mi) {
     // TODO: xử lý cmd injection nếu cần
-    return o_KExec ? o_KExec(_this, cmd, mi) : nullptr;
+    return o_KExec ? o_KExec(cmd, mi) : false;
 }
 
 // ─── Hook: KCommand::ExecuteCommand ──────────────────────────────────────────
@@ -325,18 +326,23 @@ static void* h_ExecuteCommand(void* _this, void* cmd, void* mi) {
     return o_ExecuteCommand ? o_ExecuteCommand(_this, cmd, mi) : nullptr;
 }
 
-// ─── Hook: Update (main thread nhịp tim) ─────────────────────────────────────
-// apply_gm() gốc được gọi mỗi frame khi g_gm = true.
-// Hook Update để inject logic mỗi frame.
+// ─── Hook: Update (main thread nhịp tim — 4 class) ───────────────────────────
+// Mỗi class cần orig riêng. Chỉ class đầu tiên (LuaViewHelper) inject GM logic.
 typedef void (*Update_t)(void* _this, void* mi);
-static Update_t o_Update_0 = nullptr;
+static Update_t o_Update_0 = nullptr; // LuaViewHelper
+static Update_t o_Update_1 = nullptr; // TimeTools
+static Update_t o_Update_2 = nullptr; // SocketTcp
+static Update_t o_Update_3 = nullptr; // GameRoleController
+
 static void h_Update_0(void* _this, void* mi) {
     if (g_gm.load(std::memory_order_acquire)) {
-        // TODO: fill logic GM mode (setHP, setAmmo, v.v.)
-        // Ví dụ: call il2cpp_runtime_invoke trên method SetMaxHP
+        // TODO: fill logic GM mode (setHP, setAmmo, v.v.) mỗi frame
     }
     if (o_Update_0) o_Update_0(_this, mi);
 }
+static void h_Update_1(void* _this, void* mi) { if (o_Update_1) o_Update_1(_this, mi); }
+static void h_Update_2(void* _this, void* mi) { if (o_Update_2) o_Update_2(_this, mi); }
+static void h_Update_3(void* _this, void* mi) { if (o_Update_3) o_Update_3(_this, mi); }
 
 // ─── h_t — worker thread ─────────────────────────────────────────────────────
 void* h_t(void*) {
@@ -374,9 +380,9 @@ void* h_t(void*) {
         else LOGE("luaL_loadbufferx not found — Lua lib may be stripped");
     }
 
-    // 2. DebugTool::RegisterDebugToolEntry
+    // 2. DebugTool::RegisterDebugToolEntry (argc=1: Action action)
     {
-        uintptr_t addr = Tim_Ham(NS_MAIN, OBFUSCATE("DebugTool"), OBFUSCATE("RegisterDebugToolEntry"), 0);
+        uintptr_t addr = Tim_Ham(NS_MAIN, OBFUSCATE("DebugTool"), OBFUSCATE("RegisterDebugToolEntry"), 1);
         if (addr) installed += DoHook((void*)addr, (void*)h_RegisterDebugToolEntry, (void**)&o_RegisterDebugToolEntry, "DebugTool::RegisterDebugToolEntry");
     }
 
@@ -399,18 +405,21 @@ void* h_t(void*) {
     }
 
     // 6. Update (main thread heartbeat — tương tự place_update() trong onimod)
-    // Thử nhiều class có Update — onimod hook 4 class (64 bytes / 16 byte mỗi entry)
+    // 4 class có Update xác nhận từ dump.cs:
+    //   LuaViewHelper (Lua entity tick), TimeTools (singleton time),
+    //   SocketTcp (network tick), GameRoleController (role controller)
     static const char* update_classes[] = {
-        OBFUSCATE("PlayerController"),
-        OBFUSCATE("GameManager"),
-        OBFUSCATE("BattleManager"),
-        OBFUSCATE("HeroController"),
+        OBFUSCATE("LuaViewHelper"),
+        OBFUSCATE("TimeTools"),
+        OBFUSCATE("SocketTcp"),
+        OBFUSCATE("GameRoleController"),
     };
-    for (const char* cls : update_classes) {
-        uintptr_t addr = Tim_Ham(NS_MAIN, cls, OBFUSCATE("Update"), 0);
-        if (addr) {
-            installed += DoHook((void*)addr, (void*)h_Update_0, (void**)&o_Update_0, cls);
-            break; // chỉ hook class Update đầu tiên tìm thấy; thêm o_Update_N nếu cần nhiều
+    {
+        void* hooks[]  = {(void*)h_Update_0,(void*)h_Update_1,(void*)h_Update_2,(void*)h_Update_3};
+        void** origs[] = {(void**)&o_Update_0,(void**)&o_Update_1,(void**)&o_Update_2,(void**)&o_Update_3};
+        for (int i = 0; i < 4; ++i) {
+            uintptr_t addr = Tim_Ham(NS_MAIN, update_classes[i], OBFUSCATE("Update"), 0);
+            if (addr) installed += DoHook((void*)addr, hooks[i], origs[i], update_classes[i]);
         }
     }
 
