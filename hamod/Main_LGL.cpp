@@ -2,11 +2,12 @@
 //  LGL MOD — com.bxzyvn.gg (v3.0.6)
 //  Test qua LGL Test Loader (máy root), sau đó ghép APK.
 //
-//  Tính năng:
-//    [0] Speed
-//    [1] Dump Lua script (ghi chunk ra /sdcard/Download/LGL_logs/bxzyvn_lua/)
-//    [2] Chặn DebugTool (block kênh debug của game)
-//    [3] GM Mode — hiện gửi lệnh "god" qua KCommand::Exec (placeholder)
+//  Tính năng (khớp menu.js):
+//    [0] Dump Lua Script — ghi chunk ra /sdcard/Download/LGL_logs/bxzyvn_lua/
+//    [1] Tang Sat Thuong — damage toggle (khi bật, nhân g_dmgmul vào dmg Lua)
+//    [2] He So Sat Thuong — seekbar 1-20 (g_dmgmul, áp dụng trong luaL_loadbufferx)
+//    [3] Bat Tu (God Mode) — set PatcherInfo.preRelease (+0x30) = true
+//    [4] GM Mode — gửi lệnh qua KCommand::Exec
 // ============================================================
 
 #define LOG_TAG      "BXZYVN_MOD"
@@ -249,41 +250,39 @@ static bool DoHook(void* addr, void* hook, void** orig, const char* name) {
 // ═══════════════════════════════════════════════════════════
 //  4. TRẠNG THÁI
 // ═══════════════════════════════════════════════════════════
-static float g_speed     = 1.0f;
-static bool  g_luadump   = false;   // [1] dump Lua chunk
-static bool  g_nodebug   = false;   // [2] chặn DebugTool
-static bool  g_gm        = false;   // [3] GM mode
+static bool  g_dump    = false;   // [0] dump Lua chunk
+static bool  g_dmg     = false;   // [1] bật damage mod
+static int   g_dmgmul  = 1;       // [2] hệ số nhân damage (1-20)
+static bool  g_god     = false;   // [3] god mode — PatcherInfo.preRelease
+static bool  g_gm      = false;   // [4] GM mode — KCommand Exec
 
 // ═══════════════════════════════════════════════════════════
-//  5. SPEED
+//  5. HOOK: luaL_loadbufferx — dump + damage patch
+//  Khi g_dump = true: ghi chunk ra file
+//  Khi g_dmg = true và g_dmgmul > 1: patch damage trong Lua bytecode
+//  (Pattern cụ thể sẽ điền sau khi phân tích file .luac đã dump)
 // ═══════════════════════════════════════════════════════════
-static float g_gameScale = 1.0f;
-void  (*o_setTS)(float, void*) = nullptr;
-float (*o_getTS)(void*)        = nullptr;
-
-void h_setTS(float v, void* mi) { T_COUNT(setTS); g_gameScale = v; if (o_setTS) o_setTS(v * g_speed, mi); }
-float h_getTS(void* mi) {
-    T_COUNT(getTS);
-    if (g_speed != 1.0f) return g_gameScale;
-    return o_getTS ? o_getTS(mi) : g_gameScale;
-}
-static void ApplySpeed() {
-    if (!o_setTS) { LOGE("Speed KHONG chay: chua hook Time.set_timeScale"); return; }
-    o_setTS(g_gameScale * g_speed, nullptr);
-    LOGI("Speed x%.0f: game dat %.2f -> thuc te %.2f", g_speed, g_gameScale, g_gameScale * g_speed);
-}
-
-// ═══════════════════════════════════════════════════════════
-//  6. HOOK: luaL_loadbufferx — dump Lua chunk
-//  Khi g_luadump = true, ghi từng chunk ra file theo thứ tự
-// ═══════════════════════════════════════════════════════════
-typedef int (*luaL_loadbufferx_t)(void* L, const char* buff, size_t size, const char* name, const char* mode);
+typedef int (*luaL_loadbufferx_t)(void* L, const char* buff, size_t sz, const char* name, const char* mode);
 static luaL_loadbufferx_t o_luaL_loadbufferx = nullptr;
 static volatile unsigned g_lua_seq = 0;
 
-static int h_luaL_loadbufferx(void* L, const char* buff, size_t size, const char* name, const char* mode) {
+// Trả về buffer đã patch (cấp phát mới) hoặc nullptr nếu không cần patch
+static const char* lua_patch_dmg(const char* buff, size_t sz, size_t* out_sz, const char* name) {
+    // TODO: sau khi dump và phân tích script, điền pattern Lua bytecode ở đây
+    // Cơ chế: tìm opcode LOADK/MUL trong bytecode liên quan đến tính damage,
+    // nhân constant với g_dmgmul.
+    // Ví dụ (placeholder):
+    //   uint8_t* p = (uint8_t*)mmap(...); memcpy(p, buff, sz);
+    //   tìm pattern, patch hệ số; *out_sz = sz; return (char*)p;
+    (void)buff; (void)sz; (void)out_sz; (void)name;
+    return nullptr;
+}
+
+static int h_luaL_loadbufferx(void* L, const char* buff, size_t sz, const char* name, const char* mode) {
     T_COUNT(luaL_loadbufferx);
-    if (g_luadump && buff && size > 0) {
+    if (!buff || sz == 0) goto call_orig;
+
+    if (g_dump) {
         static bool dir_made = false;
         if (!dir_made) {
             mkdir("/sdcard/Download/LGL_logs", 0755);
@@ -292,9 +291,7 @@ static int h_luaL_loadbufferx(void* L, const char* buff, size_t size, const char
         }
         char path[256];
         unsigned seq = __sync_fetch_and_add(&g_lua_seq, 1);
-        // Tên file: số thứ tự + tên chunk (nếu có)
         const char* cname = (name && *name) ? name : "unknown";
-        // Loại bỏ ký tự không hợp lệ trong tên file
         char safe[64]; int si = 0;
         for (int i = 0; cname[i] && si < 60; i++) {
             char c = cname[i];
@@ -305,14 +302,49 @@ static int h_luaL_loadbufferx(void* L, const char* buff, size_t size, const char
         safe[si] = 0;
         snprintf(path, sizeof(path), "/sdcard/Download/LGL_logs/bxzyvn_lua/%04u_%s.luac", seq, safe);
         int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-        if (fd >= 0) { write(fd, buff, size); close(fd); }
-        LOGI("[Lua] dump #%u: %s (%zu bytes)", seq, cname, size);
+        if (fd >= 0) { write(fd, buff, sz); close(fd); }
+        LOGI("[Lua] dump #%u: %s (%zu bytes)", seq, cname, sz);
     }
-    return o_luaL_loadbufferx ? o_luaL_loadbufferx(L, buff, size, name, mode) : 0;
+
+    if (g_dmg && g_dmgmul > 1) {
+        size_t new_sz = sz;
+        const char* patched = lua_patch_dmg(buff, sz, &new_sz, name);
+        if (patched) {
+            int r = o_luaL_loadbufferx ? o_luaL_loadbufferx(L, patched, new_sz, name, mode) : 0;
+            munmap((void*)patched, new_sz);
+            return r;
+        }
+    }
+
+call_orig:
+    return o_luaL_loadbufferx ? o_luaL_loadbufferx(L, buff, sz, name, mode) : 0;
 }
 
 // ═══════════════════════════════════════════════════════════
-//  7. HOOK: DebugTool::RegisterDebugToolEntry — chặn debug
+//  6. HOOK: PatcherInfo::Get — God Mode
+//  Static method, 0 params → (void* mi) returns PatcherInfo*
+//  Sau khi lấy instance: set field preRelease tại +0x30 = true
+//  dump.cs: public static PatcherInfo Get(); // 0x269C9A8
+//           public System.Boolean preRelease; // 0x30
+// ═══════════════════════════════════════════════════════════
+typedef void* (*PatcherInfo_Get_t)(void* mi);
+static PatcherInfo_Get_t o_PatcherInfo_Get = nullptr;
+
+static void* h_PatcherInfo_Get(void* mi) {
+    T_COUNT(PatcherInfo_Get);
+    void* inst = o_PatcherInfo_Get ? o_PatcherInfo_Get(mi) : nullptr;
+    if (inst && g_god) {
+        uint8_t old_val = Field<uint8_t>(inst, 0x30);
+        if (!old_val) {
+            Field<uint8_t>(inst, 0x30) = 1;  // preRelease = true → god mode
+            LOGI("[God] PatcherInfo.preRelease @%p+0x30: %u -> 1", inst, old_val);
+        }
+    }
+    return inst;
+}
+
+// ═══════════════════════════════════════════════════════════
+//  7. HOOK: DebugTool::RegisterDebugToolEntry — chặn debug (giữ nguyên)
 //  Instance method, argc=1 (Action action)
 //  dump.cs: public void RegisterDebugToolEntry(System.Action action)
 // ═══════════════════════════════════════════════════════════
@@ -362,43 +394,40 @@ static bool SendCommand(const char* cmd_utf8) {
 static void ResolveAll() {
     LOGI("=== Resolve START ===");
 
-    // [0] Speed
-    T_HOOK("UnityEngine", "Time", "get_timeScale", 0, getTS);
-    T_HOOK("UnityEngine", "Time", "set_timeScale", 1, setTS);
-    if (o_getTS) g_gameScale = o_getTS(nullptr);
-
-    // [1] Lua dump — tìm luaL_loadbufferx trong tất cả thư viện
+    // [0/1/2] Lua dump + damage — tìm luaL_loadbufferx trong tất cả thư viện
     {
         void* lua_sym = FindSymAnywhere(OBFUSCATE("luaL_loadbufferx"));
         if (lua_sym) {
             bool ok = DoHook(lua_sym, (void*)h_luaL_loadbufferx, (void**)&o_luaL_loadbufferx, "luaL_loadbufferx");
-            if (ok) { LOGI("Hook OK: luaL_loadbufferx @ %p", lua_sym); g_hook_ok++; }
-            else    { LOGE("Hook FAIL: luaL_loadbufferx"); g_hook_fail++; }
+            if (ok) { g_hook_ok++; } else { g_hook_fail++; }
         } else {
-            LOGE("KHONG THAY luaL_loadbufferx trong bat ky lib nao — co the Lua da bi strip");
+            LOGE("KHONG THAY luaL_loadbufferx — Lua co the la libxlua.so (se thu sau)");
         }
     }
 
-    // [2] DebugTool
-    T_HOOK("", "DebugTool", "RegisterDebugToolEntry", 1, RegisterDebugToolEntry);
+    // [3] God Mode — PatcherInfo::Get (static, 0 params)
+    // dump.cs: public static PatcherInfo Get(); — no namespace
+    T_HOOK("", "PatcherInfo", "Get", 0, PatcherInfo_Get);
 
-    // [3] KCommand::Exec (static, argc=1)
-    T_HOOK("", "KCommand", "Exec", 1, KExec);
+    // Debug/GM hooks
+    T_HOOK("", "DebugTool", "RegisterDebugToolEntry", 1, RegisterDebugToolEntry);
+    T_HOOK("", "KCommand",  "Exec", 1, KExec);
 
     TraceReport();
     LOGI("=== Resolve DONE ===");
 }
 
 // ═══════════════════════════════════════════════════════════
-//  10. MENU
+//  10. MENU — khớp menu.js (5 tính năng)
 // ═══════════════════════════════════════════════════════════
 jobjectArray GetFeatureList(JNIEnv* env, jobject) {
     const char* features[] = {
         OBFUSCATE("Category_" GAME_NAME),
-        OBFUSCATE("0_SeekBar_⚡ Tốc Độ_1_10"),
-        OBFUSCATE("1_Toggle_📜 Dump Script Lua"),
-        OBFUSCATE("2_Toggle_🔕 Chặn DebugTool"),
-        OBFUSCATE("3_Toggle_👑 GM Mode (thử nghiệm)"),
+        OBFUSCATE("0_Toggle_Boc Script Lua"),
+        OBFUSCATE("1_Toggle_Tang Sat Thuong"),
+        OBFUSCATE("2_SeekBar_He So Sat Thuong_1_20"),
+        OBFUSCATE("3_Toggle_Bat Tu (God Mode)"),
+        OBFUSCATE("4_Toggle_GM Mode"),
     };
     int total = sizeof(features) / sizeof(features[0]);
     jobjectArray ret = env->NewObjectArray(
@@ -417,23 +446,29 @@ void Changes(JNIEnv* env, jclass, jobject,
     LOGI("Menu: tinh nang %d -> value=%d bat=%d", featNum, value, boolean);
     switch (featNum) {
         case 0:
-            g_speed = (value < 1) ? 1.0f : (float)value;
-            ApplySpeed();
+            g_dump = boolean;
+            LOGI("Dump Lua: %s", g_dump ? "BAT" : "TAT");
+            if (g_dump) LOGI("  -> ghi vao /sdcard/Download/LGL_logs/bxzyvn_lua/");
             break;
         case 1:
-            g_luadump = boolean;
-            LOGI("Dump Lua: %s", g_luadump ? "BAT" : "TAT");
-            if (g_luadump) LOGI("  -> Lua chunks se ghi vao /sdcard/Download/LGL_logs/bxzyvn_lua/");
+            g_dmg = boolean;
+            LOGI("Damage Mod: %s (x%d)", g_dmg ? "BAT" : "TAT", g_dmgmul);
+            if (g_dmg && g_dmgmul <= 1)
+                LOGI("  -> bat g_dmgmul truoc (tinh nang 2) roi moi bat tinh nang 1");
             break;
         case 2:
-            g_nodebug = boolean;
-            LOGI("Block DebugTool: %s", g_nodebug ? "BAT" : "TAT");
+            g_dmgmul = (value < 1) ? 1 : (value > 20 ? 20 : value);
+            LOGI("Damage Multiplier: x%d", g_dmgmul);
             break;
         case 3:
+            g_god = boolean;
+            LOGI("God Mode: %s", g_god ? "BAT" : "TAT");
+            // PatcherInfo.preRelease sẽ được set trong hook PatcherInfo::Get()
+            break;
+        case 4:
             g_gm = boolean;
             LOGI("GM Mode: %s", g_gm ? "BAT" : "TAT");
-            // TODO: điền lệnh Lua thực tế sau khi dump script
-            // SendCommand("god 1");
+            // TODO: thêm lệnh cụ thể sau khi biết KCommand game hỗ trợ gì
             break;
     }
 }
