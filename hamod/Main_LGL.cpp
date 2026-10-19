@@ -2,12 +2,12 @@
 //  LGL MOD — com.bxzyvn.gg (v3.0.6)
 //  Test qua LGL Test Loader (máy root), sau đó ghép APK.
 //
-//  Tính năng (khớp menu.js):
-//    [0] Dump Lua Script — ghi chunk ra /sdcard/Download/LGL_logs/bxzyvn_lua/
-//    [1] Tang Sat Thuong — damage toggle (khi bật, nhân g_dmgmul vào dmg Lua)
-//    [2] He So Sat Thuong — seekbar 1-20 (g_dmgmul, áp dụng trong luaL_loadbufferx)
-//    [3] Bat Tu (God Mode) — set PatcherInfo.preRelease (+0x30) = true
-//    [4] GM Mode — gửi lệnh qua KCommand::Exec
+//  Tính năng (menu LGL):
+//    [AUTO] Dump Lua — tự dump mọi script vào LGL_logs/bxzyvn_lua/ (không cần toggle)
+//    [0]    Tang Sat Thuong — damage toggle
+//    [1]    He So Sat Thuong — seekbar 1-20
+//    [2]    Bat Tu (God Mode) — PatcherInfo.preRelease (+0x30) = true
+//    [3]    GM Mode — KCommand::Exec
 // ============================================================
 
 #define LOG_TAG      "BXZYVN_MOD"
@@ -251,8 +251,7 @@ static bool DoHook(void* addr, void* hook, void** orig, const char* name) {
 // ═══════════════════════════════════════════════════════════
 //  4. TRẠNG THÁI
 // ═══════════════════════════════════════════════════════════
-static bool  g_dump    = false;   // [0] dump Lua chunk
-static bool  g_dmg     = false;   // [1] bật damage mod
+static bool  g_dmg     = false;   // [0] bật damage mod
 static int   g_dmgmul  = 1;       // [2] hệ số nhân damage (1-20)
 static bool  g_god     = false;   // [3] god mode — PatcherInfo.preRelease
 static bool  g_gm      = false;   // [4] GM mode — KCommand Exec
