@@ -296,7 +296,7 @@ static luaL_loadbufferx_t o_luaL_loadbufferx = nullptr;
 // Dùng outer pcall để absorb mọi lỗi runtime → stack luôn về 0 sau pcall
 static void ApplyRuntimePatch(void* L) {
     if (!o_lua_pcall || !o_luaL_loadbufferx) return;
-    char code[4096];
+    char code[2048];
     snprintf(code, sizeof(code),
         "pcall(function()\n"
         "  if not DU_lgl_orig then\n"
@@ -309,7 +309,7 @@ static void ApplyRuntimePatch(void* L) {
         "      DU.calModifiedDamage=function(i,t,d)\n"
         "        local r=DU_lgl_orig(i,t,d)\n"
         "        local m=DU_lgl_mul\n"
-        "        if m and m>1 and rawget(i,'player')~=nil then return r*m end\n"
+        "        if m and m>1 and i and i.camp==EPlayerCamp.Attacker then return r*m end\n"
         "        return r\n"
         "      end\n"
         "    end\n"
@@ -324,33 +324,9 @@ static void ApplyRuntimePatch(void* L) {
         "      PD_lgl_patched=true\n"
         "      local o=PD.setCurHp\n"
         "      PD.setCurHp=function(self,hp,d)\n"
-        "        _lgl_n=(_lgl_n or 0)+1\n"
-        "        if _lgl_n<=3 then\n"
-        "          local s='[D#'.._lgl_n..']T='..type(self)..';hp='..tostring(hp)..';'\n"
-        "          if type(self)=='table' then\n"
-        "            local n=0\n"
-        "            for k,v in pairs(self) do\n"
-        "              s=s..tostring(k)..'='..type(v)..';'\n"
-        "              n=n+1;if n>=20 then s=s..'...';break end\n"
-        "            end\n"
-        "          else\n"
-        "            local mt=getmetatable(self)\n"
-        "            if mt and type(mt.__index)=='table' then\n"
-        "              local n=0\n"
-        "              for k in pairs(mt.__index) do\n"
-        "                s=s..tostring(k)..';'\n"
-        "                n=n+1;if n>=40 then s=s..'N='..n;break end\n"
-        "              end\n"
-        "            else s=s..'mt_idx='..type(mt and mt.__index) end\n"
-        "          end\n"
-        "          pcall(function()\n"
-        "            local f=io.open('/data/data/com.bxzyvn.gg/files/lgltrace.txt','a')\n"
-        "            if f then f:write(s..'\\n');f:close() end\n"
-        "          end)\n"
-        "        end\n"
-        "        if PD_lgl_god then\n"
+        "        if PD_lgl_god and self and self.camp==EPlayerCamp.Attacker then\n"
         "          local ok,cur=pcall(self.getAttrVal,self,Battle.AttrEnum.CurHp)\n"
-        "          if ok and cur and hp<cur and rawget(self,'player')~=nil then return end\n"
+        "          if ok and cur and hp<cur then return end\n"
         "        end\n"
         "        return o(self,hp,d)\n"
         "      end\n"
@@ -358,12 +334,13 @@ static void ApplyRuntimePatch(void* L) {
         "  end\n"
         "  PD_lgl_god=%s\n"
         "end)\n",
-        g_dmgmul, g_dmgmul, g_god ? "true" : "false"
+        g_dmg ? g_dmgmul : 1, g_dmg ? g_dmgmul : 1, g_god ? "true" : "false"
     );
     int r1 = o_luaL_loadbufferx(L, code, strlen(code), "@lgl_patch", nullptr);
-    if (r1 != 0) { LOGE("[Patch] compile FAIL r=%d (bug trong template)", r1); return; }
+    if (r1 != 0) { LOGE("[Patch] compile FAIL r=%d", r1); return; }
     o_lua_pcall(L, 0, 0, 0);
-    LOGI("[Patch] inject OK: dmg x%d god=%d", g_dmgmul, g_god);
+    int eff = g_dmg ? g_dmgmul : 1;
+    LOGI("[Patch] inject OK: dmg=%d x%d god=%d", g_dmg, eff, g_god);
 }
 
 static int h_luaL_loadbufferx(void* L, const char* buff, size_t sz, const char* name, const char* mode) {
