@@ -296,7 +296,7 @@ static luaL_loadbufferx_t o_luaL_loadbufferx = nullptr;
 // Dùng outer pcall để absorb mọi lỗi runtime → stack luôn về 0 sau pcall
 static void ApplyRuntimePatch(void* L) {
     if (!o_lua_pcall || !o_luaL_loadbufferx) return;
-    char code[2048];
+    char code[4096];
     snprintf(code, sizeof(code),
         "pcall(function()\n"
         "  if not DU_lgl_orig then\n"
@@ -308,7 +308,9 @@ static void ApplyRuntimePatch(void* L) {
         "      DU_lgl_orig=DU.calModifiedDamage;DU_lgl_mul=%d\n"
         "      DU.calModifiedDamage=function(i,t,d)\n"
         "        local r=DU_lgl_orig(i,t,d)\n"
-        "        local m=DU_lgl_mul;if m and m>1 then return r*m end;return r\n"
+        "        local m=DU_lgl_mul\n"
+        "        if m and m>1 and rawget(i,'player')~=nil then return r*m end\n"
+        "        return r\n"
         "      end\n"
         "    end\n"
         "  else DU_lgl_mul=%d end\n"
@@ -322,9 +324,33 @@ static void ApplyRuntimePatch(void* L) {
         "      PD_lgl_patched=true\n"
         "      local o=PD.setCurHp\n"
         "      PD.setCurHp=function(self,hp,d)\n"
+        "        _lgl_n=(_lgl_n or 0)+1\n"
+        "        if _lgl_n<=3 then\n"
+        "          local s='[D#'.._lgl_n..']T='..type(self)..';hp='..tostring(hp)..';'\n"
+        "          if type(self)=='table' then\n"
+        "            local n=0\n"
+        "            for k,v in pairs(self) do\n"
+        "              s=s..tostring(k)..'='..type(v)..';'\n"
+        "              n=n+1;if n>=20 then s=s..'...';break end\n"
+        "            end\n"
+        "          else\n"
+        "            local mt=getmetatable(self)\n"
+        "            if mt and type(mt.__index)=='table' then\n"
+        "              local n=0\n"
+        "              for k in pairs(mt.__index) do\n"
+        "                s=s..tostring(k)..';'\n"
+        "                n=n+1;if n>=40 then s=s..'N='..n;break end\n"
+        "              end\n"
+        "            else s=s..'mt_idx='..type(mt and mt.__index) end\n"
+        "          end\n"
+        "          pcall(function()\n"
+        "            local f=io.open('/data/data/com.bxzyvn.gg/files/lgltrace.txt','a')\n"
+        "            if f then f:write(s..'\\n');f:close() end\n"
+        "          end)\n"
+        "        end\n"
         "        if PD_lgl_god then\n"
         "          local ok,cur=pcall(self.getAttrVal,self,Battle.AttrEnum.CurHp)\n"
-        "          if ok and cur and hp<cur then return end\n"
+        "          if ok and cur and hp<cur and rawget(self,'player')~=nil then return end\n"
         "        end\n"
         "        return o(self,hp,d)\n"
         "      end\n"
@@ -412,15 +438,7 @@ static PatcherInfo_Get_t o_PatcherInfo_Get = nullptr;
 
 static void* h_PatcherInfo_Get(void* mi) {
     T_COUNT(PatcherInfo_Get);
-    void* inst = o_PatcherInfo_Get ? o_PatcherInfo_Get(mi) : nullptr;
-    if (inst && g_god) {
-        uint8_t old_val = Field<uint8_t>(inst, 0x30);
-        if (!old_val) {
-            Field<uint8_t>(inst, 0x30) = 1;  // preRelease = true → god mode
-            LOGI("[God] PatcherInfo.preRelease @%p+0x30: %u -> 1", inst, old_val);
-        }
-    }
-    return inst;
+    return o_PatcherInfo_Get ? o_PatcherInfo_Get(mi) : nullptr;
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -468,16 +486,18 @@ static bool SendCommand(const char* cmd_utf8) {
     return r;
 }
 
-// thread thử lại hook luaL_loadbufferx + lua_pcall (libxlua.so nạp trễ sau ResolveAll)
+// thread thử lại hook luaL_loadbufferx + lua_pcall — chạy vô hạn cho đến khi tìm được
+// libxlua.so chỉ nạp khi vào trận nên không giới hạn thời gian chờ
 static void* lua_retry_thread(void*) {
-    LOGI("[Lua] libxlua chua nap, thu lai moi 500ms (toi da 30s)...");
-    for (int i = 0; i < 60 && (!o_luaL_loadbufferx || !o_lua_pcall); i++) {
-        usleep(500000);
+    LOGI("[Lua] Retry thread: cho libxlua.so nap (co the chi load khi vao tran)...");
+    for (int i = 0; !o_luaL_loadbufferx || !o_lua_pcall; i++) {
+        usleep(2000000); // 2s mỗi lần
+        if (i % 15 == 0) LOGI("[Lua] Van cho libxlua... (~%ds)", i*2);
         if (!o_luaL_loadbufferx) {
             void* sym = FindSymAnywhere("luaL_loadbufferx");
             if (sym) {
                 bool ok = DoHook(sym, (void*)h_luaL_loadbufferx, (void**)&o_luaL_loadbufferx, "luaL_loadbufferx");
-                if (ok) { LOGI("[Lua] Hook MUON luaL_loadbufferx OK (sau ~%ds)", (i+1)/2); g_hook_ok++; }
+                if (ok) { LOGI("[Lua] Hook MUON luaL_loadbufferx OK (sau ~%ds)", i*2); g_hook_ok++; }
                 else   { LOGE("[Lua] Hook MUON luaL_loadbufferx FAIL"); g_hook_fail++; }
             }
         }
@@ -485,19 +505,22 @@ static void* lua_retry_thread(void*) {
             void* pcall_sym = FindSymAnywhere("lua_pcall");
             if (pcall_sym) {
                 bool ok2 = DoHook(pcall_sym, (void*)h_lua_pcall, (void**)&o_lua_pcall, "lua_pcall");
-                if (ok2) { LOGI("[Lua] Hook MUON lua_pcall OK"); g_hook_ok++; }
+                if (ok2) { LOGI("[Lua] Hook MUON lua_pcall OK (sau ~%ds)", i*2); g_hook_ok++; }
                 else     { LOGE("[Lua] Hook MUON lua_pcall FAIL"); g_hook_fail++; }
             }
         }
-        if (o_luaL_loadbufferx && o_lua_pcall) return nullptr;
-    }
-    if (!o_luaL_loadbufferx || !o_lua_pcall) {
-        LOGE("[Lua] Sau 30s: luaL_loadbufferx=%s lua_pcall=%s — danh sach lib:",
-             o_luaL_loadbufferx ? "OK" : "FAIL", o_lua_pcall ? "OK" : "FAIL");
-        dl_iterate_phdr([](struct dl_phdr_info* info, size_t, void*) -> int {
-            if (info->dlpi_name && *info->dlpi_name) LOGI("[lib] %s", info->dlpi_name);
-            return 0;
-        }, nullptr);
+        if (o_luaL_loadbufferx && o_lua_pcall) {
+            LOGI("[Lua] Ca 2 hook OK sau ~%ds — san sang patch!", i*2);
+            return nullptr;
+        }
+        // Cứ 60s log danh sách lib để debug (chỉ khi vẫn chưa tìm được)
+        if (i > 0 && i % 30 == 0) {
+            LOGI("[Lua] Sau %ds: danh sach lib:", i*2);
+            dl_iterate_phdr([](struct dl_phdr_info* info, size_t, void*) -> int {
+                if (info->dlpi_name && *info->dlpi_name) LOGI("[lib] %s", info->dlpi_name);
+                return 0;
+            }, nullptr);
+        }
     }
     return nullptr;
 }
