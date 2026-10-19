@@ -372,15 +372,18 @@ static int h_luaL_loadbufferx(void* L, const char* buff, size_t sz, const char* 
         if (fd >= 0) { write(fd, buff, sz); close(fd); }
     }
 
-    // Đánh dấu DamageUtil đã thấy
-    if (!g_dmg_seen && name && strstr(name, "DamageUtil"))
+    // Đánh dấu DamageUtil đã thấy (chỉ dùng để log)
+    if (!g_dmg_seen && name && strstr(name, "DamageUtil")) {
         g_dmg_seen = true;
+        LOGI("[Lua] DamageUtil seen — hook da cai, thu patch luon");
+    }
 
     // Runtime patch: inject TRƯỚC khi game load script này (stack sạch ở đây)
-    // Thử install tối đa 3 lần sau khi thấy DamageUtil (lần 1 có thể DU chưa execute)
+    // Thử install tối đa 3 lần bất kể g_dmg_seen — DamageUtil có thể đã load trước
+    // khi hook được gắn (libxlua load muộn), nhưng vẫn còn trong package.loaded.
     // Re-apply khi g_patch_needed=1 (Changes thay đổi settings)
     if (f_lua_pcall) {
-        bool try_install = g_dmg_seen && (g_patch_try < 3);
+        bool try_install = (g_patch_try < 3);
         bool try_update  = (g_patch_needed != 0);
         if (try_install || try_update) {
             if (try_install) g_patch_try++;
