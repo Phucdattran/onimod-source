@@ -251,10 +251,11 @@ static bool DoHook(void* addr, void* hook, void** orig, const char* name) {
 // ═══════════════════════════════════════════════════════════
 //  4. TRẠNG THÁI
 // ═══════════════════════════════════════════════════════════
-static bool  g_dmg     = false;   // [0] bật damage mod
-static int   g_dmgmul  = 1;       // [2] hệ số nhân damage (1-20)
-static bool  g_god     = false;   // [3] god mode — PatcherInfo.preRelease
-static bool  g_gm      = false;   // [4] GM mode — KCommand Exec
+static bool  g_dmg     = false;
+static int   g_dmgmul  = 1;
+static bool  g_god     = false;
+static bool  g_gm      = false;
+static bool  g_nodebug = false;
 
 // ═══════════════════════════════════════════════════════════
 //  5. HOOK: luaL_loadbufferx — dump + damage patch
