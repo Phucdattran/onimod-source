@@ -265,7 +265,6 @@ static bool  g_gm      = false;   // [4] GM mode — KCommand Exec
 // ═══════════════════════════════════════════════════════════
 typedef int (*luaL_loadbufferx_t)(void* L, const char* buff, size_t sz, const char* name, const char* mode);
 static luaL_loadbufferx_t o_luaL_loadbufferx = nullptr;
-static volatile unsigned g_lua_seq = 0;
 
 // Tìm text pattern trong Lua source (memmem), insert dòng nhân damage
 // Trả về buffer mới (mmap) hoặc nullptr nếu không tìm thấy
@@ -309,7 +308,8 @@ static int h_luaL_loadbufferx(void* L, const char* buff, size_t sz, const char* 
     T_COUNT(luaL_loadbufferx);
     if (!buff || sz == 0) goto call_orig;
 
-    if (g_dump) {
+    // Auto-dump mọi script (không cần toggle); O_EXCL = chỉ ghi lần đầu, bỏ qua nếu đã có
+    {
         static bool dir_made = false;
         if (!dir_made) {
             mkdir("/sdcard/Download/LGL_logs", 0755);
@@ -317,7 +317,6 @@ static int h_luaL_loadbufferx(void* L, const char* buff, size_t sz, const char* 
             dir_made = true;
         }
         char path[256];
-        unsigned seq = __sync_fetch_and_add(&g_lua_seq, 1);
         const char* cname = (name && *name) ? name : "unknown";
         char safe[64]; int si = 0;
         for (int i = 0; cname[i] && si < 60; i++) {
@@ -327,10 +326,13 @@ static int h_luaL_loadbufferx(void* L, const char* buff, size_t sz, const char* 
             else safe[si++] = '_';
         }
         safe[si] = 0;
-        snprintf(path, sizeof(path), "/sdcard/Download/LGL_logs/bxzyvn_lua/%04u_%s.luac", seq, safe);
-        int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-        if (fd >= 0) { write(fd, buff, sz); close(fd); }
-        LOGI("[Lua] dump #%u: %s (%zu bytes)", seq, cname, sz);
+        snprintf(path, sizeof(path), "/sdcard/Download/LGL_logs/bxzyvn_lua/%s.lua", safe);
+        int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0644); // O_EXCL: bỏ qua nếu đã dump
+        if (fd >= 0) {
+            write(fd, buff, sz);
+            close(fd);
+            LOGI("[Lua] dump: %s (%zu bytes)", cname, sz);
+        }
     }
 
     if (g_dmg && g_dmgmul > 1) {
@@ -445,16 +447,15 @@ static void ResolveAll() {
 }
 
 // ═══════════════════════════════════════════════════════════
-//  10. MENU — khớp menu.js (5 tính năng)
+//  10. MENU — khớp menu.js (4 tính năng; dump tự chạy, ko cần toggle)
 // ═══════════════════════════════════════════════════════════
 jobjectArray GetFeatureList(JNIEnv* env, jobject) {
     const char* features[] = {
         OBFUSCATE("Category_" GAME_NAME),
-        OBFUSCATE("0_Toggle_Boc Script Lua"),
-        OBFUSCATE("1_Toggle_Tang Sat Thuong"),
-        OBFUSCATE("2_SeekBar_He So Sat Thuong_1_20"),
-        OBFUSCATE("3_Toggle_Bat Tu (God Mode)"),
-        OBFUSCATE("4_Toggle_GM Mode"),
+        OBFUSCATE("0_Toggle_Tang Sat Thuong"),
+        OBFUSCATE("1_SeekBar_He So Sat Thuong_1_20"),
+        OBFUSCATE("2_Toggle_Bat Tu (God Mode)"),
+        OBFUSCATE("3_Toggle_GM Mode"),
     };
     int total = sizeof(features) / sizeof(features[0]);
     jobjectArray ret = env->NewObjectArray(
@@ -473,29 +474,20 @@ void Changes(JNIEnv* env, jclass, jobject,
     LOGI("Menu: tinh nang %d -> value=%d bat=%d", featNum, value, boolean);
     switch (featNum) {
         case 0:
-            g_dump = boolean;
-            LOGI("Dump Lua: %s", g_dump ? "BAT" : "TAT");
-            if (g_dump) LOGI("  -> ghi vao /sdcard/Download/LGL_logs/bxzyvn_lua/");
-            break;
-        case 1:
             g_dmg = boolean;
             LOGI("Damage Mod: %s (x%d)", g_dmg ? "BAT" : "TAT", g_dmgmul);
-            if (g_dmg && g_dmgmul <= 1)
-                LOGI("  -> bat g_dmgmul truoc (tinh nang 2) roi moi bat tinh nang 1");
             break;
-        case 2:
+        case 1:
             g_dmgmul = (value < 1) ? 1 : (value > 20 ? 20 : value);
             LOGI("Damage Multiplier: x%d", g_dmgmul);
             break;
-        case 3:
+        case 2:
             g_god = boolean;
             LOGI("God Mode: %s", g_god ? "BAT" : "TAT");
-            // PatcherInfo.preRelease sẽ được set trong hook PatcherInfo::Get()
             break;
-        case 4:
+        case 3:
             g_gm = boolean;
             LOGI("GM Mode: %s", g_gm ? "BAT" : "TAT");
-            // TODO: thêm lệnh cụ thể sau khi biết KCommand game hỗ trợ gì
             break;
     }
 }
