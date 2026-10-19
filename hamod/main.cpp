@@ -309,7 +309,7 @@ static bool ParseConfig(const char* text) {
     if (count < 3) return false;
 
     bool  dmg = v[0] >= 0.5f;
-    float mul = v[1] < 1.0f ? 1.0f : (v[1] > 100.0f ? 100.0f : v[1]);
+    float mul = v[1] < 1.0f ? 1.0f : (v[1] > 99999.0f ? 99999.0f : v[1]);
     bool  god = v[2] >= 0.5f;
 
     bool changed = (dmg != g_dmg.load(std::memory_order_relaxed)) ||
