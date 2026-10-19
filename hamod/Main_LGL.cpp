@@ -345,7 +345,7 @@ static int h_luaL_loadbufferx(void* L, const char* buff, size_t sz, const char* 
         }
     }
 
-    if (g_dmg && g_dmgmul > 1) {
+    if (g_dmgmul > 1) {
         size_t new_sz = sz;
         const char* patched = lua_patch_dmg(buff, sz, &new_sz, name);
         if (patched) {
