@@ -296,12 +296,11 @@ static luaL_loadbufferx_t o_luaL_loadbufferx = nullptr;
 // Dùng outer pcall để absorb mọi lỗi runtime
 static void ApplyRuntimePatch(void* L) {
     if (!o_lua_pcall || !o_luaL_loadbufferx) return;
-    char code[3000];
+    char code[2048];
     snprintf(code, sizeof(code),
         "pcall(function()\n"
         "  DU_lgl_mul=%d\n"
         "  DU_lgl_god=%s\n"
-        "  DU_lgl_spd=%d\n"
         "  if not DU_lgl_orig then\n"
         "    local DU=nil\n"
         "    for _,v in pairs(package.loaded) do\n"
@@ -315,16 +314,6 @@ static void ApplyRuntimePatch(void* L) {
         "        local m=DU_lgl_mul\n"
         "        if m and m>1 and i and i.camp==EPlayerCamp.Attacker then return r*m end\n"
         "        return r\n"
-        "      end\n"
-        "    end\n"
-        "  end\n"
-        "  if not SM_lgl_orig then\n"
-        "    local SM=package.loaded['Battle.Sce.SceneManager']\n"
-        "    if SM and SM.update then\n"
-        "      SM_lgl_orig=SM.update\n"
-        "      SM.update=function(self,dt,...)\n"
-        "        local s=DU_lgl_spd\n"
-        "        return SM_lgl_orig(self,(s and s>1) and dt*s or dt,...)\n"
         "      end\n"
         "    end\n"
         "  end\n"
@@ -346,7 +335,7 @@ static void ApplyRuntimePatch(void* L) {
         "    end)\n"
         "  end\n"
         "end)\n",
-        g_dmg ? g_dmgmul : 1, g_god ? "true" : "false", g_spdmul
+        g_dmg ? g_dmgmul : 1, g_god ? "true" : "false"
     );
     int r1 = o_luaL_loadbufferx(L, code, strlen(code), "@lgl_patch", nullptr);
     if (r1 != 0) { LOGE("[Patch] compile FAIL r=%d", r1); return; }
@@ -411,6 +400,30 @@ static int h_lua_pcall(void* L, int nargs, int nresults, int msgh) {
         }
     }
     return o_lua_pcall ? o_lua_pcall(L, nargs, nresults, msgh) : 0;
+}
+
+// ═══════════════════════════════════════════════════════════
+//  6. HOOK: Time.set_timeScale + Time.get_timeScale — Tốc độ trận
+//  set: nhân speed factor; get: trả giá trị game đặt để tránh nhân dồn
+// ═══════════════════════════════════════════════════════════
+typedef void  (*set_timeScale_t)(float, void*);
+typedef float (*get_timeScale_t)(void*);
+static set_timeScale_t o_set_timeScale = nullptr;
+static get_timeScale_t o_get_timeScale = nullptr;
+static float g_game_timescale = 1.0f;
+static void* g_timescale_mi   = nullptr;
+
+static void h_set_timeScale(float value, void* mi) {
+    T_COUNT(set_timeScale);
+    g_game_timescale = value;
+    if (!g_timescale_mi) g_timescale_mi = mi;
+    float actual = (g_spd && g_spdmul > 1) ? value * g_spdmul : value;
+    LOGI("TimeScale: game=%.2f actual=%.2f", value, actual);
+    if (o_set_timeScale) o_set_timeScale(actual, mi);
+}
+static float h_get_timeScale(void* mi) {
+    T_COUNT(get_timeScale);
+    return g_game_timescale;
 }
 
 // thread thử lại hook luaL_loadbufferx + lua_pcall — chạy vô hạn cho đến khi tìm được
@@ -488,6 +501,10 @@ static void ResolveAll() {
         }
     }
 
+    // [2] Speed — Time.set/get_timeScale
+    T_HOOK("UnityEngine", "Time", "set_timeScale", 1, set_timeScale);
+    T_HOOK("UnityEngine", "Time", "get_timeScale", 0, get_timeScale);
+
     TraceReport();
     LOGI("=== Resolve DONE ===");
 }
@@ -537,7 +554,8 @@ void Changes(JNIEnv* env, jclass, jobject,
             g_spdmul = spd_table[idx];
             g_spd = (g_spdmul > 1);
             LOGI("Speed: x%d (idx=%d)", g_spdmul, idx);
-            g_patch_needed = 1;
+            if (o_set_timeScale && g_timescale_mi)
+                o_set_timeScale(g_game_timescale * (g_spd ? g_spdmul : 1), g_timescale_mi);
             break;
         }
         case 3:
