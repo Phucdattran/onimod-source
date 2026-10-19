@@ -271,24 +271,22 @@ static bool  g_nodebug = false;
 
 // Lua runtime patch (package.loaded: calModifiedDamage + setCurHp)
 typedef int (*lua_pcall_t)(void*, int, int, int);
-static lua_pcall_t  f_lua_pcall    = nullptr;
-static void*        g_L            = nullptr;   // Lua state, lưu khi hook lần đầu
+static lua_pcall_t  o_lua_pcall    = nullptr;   // Dobby trampoline → original lua_pcall
+static void*        g_L            = nullptr;   // Lua state, capture từ h_lua_pcall
 static bool         g_dmg_seen     = false;     // DamageUtil.lua đã qua hook
 static int          g_patch_try    = 0;         // số lần thử install (tối đa 3)
 static volatile int g_patch_needed = 0;         // 1 = cần re-apply (set bởi Changes)
+static volatile int g_in_patch     = 0;         // re-entrancy guard cho ApplyRuntimePatch
 
 // ═══════════════════════════════════════════════════════════
-//  5. HOOK: luaL_loadbufferx — dump Lua + runtime patch
+//  5. HOOK: luaL_loadbufferx (dump Lua) + lua_pcall (trigger patch)
 //
-//  Runtime patch strategy (report xác nhận DamageUtil load lúc startup):
-//  - Sau khi DamageUtil thấy qua hook, inject Lua code vào Lua state
-//    bằng o_luaL_loadbufferx + f_lua_pcall để:
-//      a) Wrap calModifiedDamage trong package.loaded (DamageUtil module)
-//         → DU_lgl_mul: nhân damage mỗi lần game gọi
-//      b) Wrap setCurHp trong PlayerData module
-//         → PD_lgl_god: block HP giảm khi god mode bật
-//  - Wrap dùng Lua globals (DU_lgl_mul, PD_lgl_god) → thay đổi từ
-//    Changes() bằng cách set g_patch_needed=1 và update khi Lua call tiếp theo
+//  Runtime patch strategy:
+//  - lua_pcall hook (h_lua_pcall) captures Lua state + triggers ApplyRuntimePatch
+//    (luaL_loadbufferx không trigger patch vì script load trước khi hook được gắn)
+//  - ApplyRuntimePatch dùng o_luaL_loadbufferx + o_lua_pcall để inject Lua code:
+//      a) Wrap calModifiedDamage → DU_lgl_mul (damage multiplier)
+//      b) Wrap setCurHp → PD_lgl_god (god mode)
 // ═══════════════════════════════════════════════════════════
 typedef int (*luaL_loadbufferx_t)(void* L, const char* buff, size_t sz, const char* name, const char* mode);
 static luaL_loadbufferx_t o_luaL_loadbufferx = nullptr;
@@ -297,7 +295,7 @@ static luaL_loadbufferx_t o_luaL_loadbufferx = nullptr;
 // Gọi TRƯỚC o_luaL_loadbufferx cho game script → stack clean khi gọi
 // Dùng outer pcall để absorb mọi lỗi runtime → stack luôn về 0 sau pcall
 static void ApplyRuntimePatch(void* L) {
-    if (!f_lua_pcall || !o_luaL_loadbufferx) return;
+    if (!o_lua_pcall || !o_luaL_loadbufferx) return;
     char code[2048];
     snprintf(code, sizeof(code),
         "pcall(function()\n"
@@ -338,7 +336,7 @@ static void ApplyRuntimePatch(void* L) {
     );
     int r1 = o_luaL_loadbufferx(L, code, strlen(code), "@lgl_patch", nullptr);
     if (r1 != 0) { LOGE("[Patch] compile FAIL r=%d (bug trong template)", r1); return; }
-    f_lua_pcall(L, 0, 0, 0);
+    o_lua_pcall(L, 0, 0, 0);
     LOGI("[Patch] inject OK: dmg x%d god=%d", g_dmgmul, g_god);
 }
 
@@ -378,22 +376,26 @@ static int h_luaL_loadbufferx(void* L, const char* buff, size_t sz, const char* 
         LOGI("[Lua] DamageUtil seen — hook da cai, thu patch luon");
     }
 
-    // Runtime patch: inject TRƯỚC khi game load script này (stack sạch ở đây)
-    // Thử install tối đa 3 lần bất kể g_dmg_seen — DamageUtil có thể đã load trước
-    // khi hook được gắn (libxlua load muộn), nhưng vẫn còn trong package.loaded.
-    // Re-apply khi g_patch_needed=1 (Changes thay đổi settings)
-    if (f_lua_pcall) {
-        bool try_install = (g_patch_try < 3);
-        bool try_update  = (g_patch_needed != 0);
-        if (try_install || try_update) {
-            if (try_install) g_patch_try++;
-            if (try_update)  g_patch_needed = 0;
-            ApplyRuntimePatch(L);
-        }
-    }
-
 call_orig:
     return o_luaL_loadbufferx ? o_luaL_loadbufferx(L, buff, sz, name, mode) : 0;
+}
+
+// lua_pcall hook — capture Lua state + trigger ApplyRuntimePatch
+// Được gọi teên mỗi pcall của game → luôn có Lua state L hợp lệ
+// g_in_patch guard: ApplyRuntimePatch gọi o_lua_pcall nội bộ → tránh đệ quy vô hạn
+static int h_lua_pcall(void* L, int nargs, int nresults, int msgh) {
+    T_COUNT(lua_pcall);
+    if (!g_in_patch && o_luaL_loadbufferx) {
+        if (!g_L) g_L = L;
+        if (g_patch_try < 3 || g_patch_needed) {
+            g_in_patch = 1;
+            if (g_patch_try < 3) g_patch_try++;
+            if (g_patch_needed)  g_patch_needed = 0;
+            ApplyRuntimePatch(L);
+            g_in_patch = 0;
+        }
+    }
+    return o_lua_pcall ? o_lua_pcall(L, nargs, nresults, msgh) : 0;
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -469,22 +471,29 @@ static bool SendCommand(const char* cmd_utf8) {
 // thread thử lại hook luaL_loadbufferx + lua_pcall (libxlua.so nạp trễ sau ResolveAll)
 static void* lua_retry_thread(void*) {
     LOGI("[Lua] libxlua chua nap, thu lai moi 500ms (toi da 30s)...");
-    for (int i = 0; i < 60 && !o_luaL_loadbufferx; i++) {
+    for (int i = 0; i < 60 && (!o_luaL_loadbufferx || !o_lua_pcall); i++) {
         usleep(500000);
-        void* sym = FindSymAnywhere("luaL_loadbufferx");
-        if (sym) {
-            bool ok = DoHook(sym, (void*)h_luaL_loadbufferx, (void**)&o_luaL_loadbufferx, "luaL_loadbufferx");
-            if (ok) { LOGI("[Lua] Hook MUON OK (sau ~%ds)", (i+1)/2); g_hook_ok++; }
-            else   { LOGE("[Lua] Hook MUON FAIL");                     g_hook_fail++; }
-            if (!f_lua_pcall) {
-                f_lua_pcall = (lua_pcall_t)FindSymAnywhere("lua_pcall");
-                LOGI("[Lua] lua_pcall: %s", f_lua_pcall ? "OK" : "KHONG THAY");
+        if (!o_luaL_loadbufferx) {
+            void* sym = FindSymAnywhere("luaL_loadbufferx");
+            if (sym) {
+                bool ok = DoHook(sym, (void*)h_luaL_loadbufferx, (void**)&o_luaL_loadbufferx, "luaL_loadbufferx");
+                if (ok) { LOGI("[Lua] Hook MUON luaL_loadbufferx OK (sau ~%ds)", (i+1)/2); g_hook_ok++; }
+                else   { LOGE("[Lua] Hook MUON luaL_loadbufferx FAIL"); g_hook_fail++; }
             }
-            return nullptr;
         }
+        if (!o_lua_pcall) {
+            void* pcall_sym = FindSymAnywhere("lua_pcall");
+            if (pcall_sym) {
+                bool ok2 = DoHook(pcall_sym, (void*)h_lua_pcall, (void**)&o_lua_pcall, "lua_pcall");
+                if (ok2) { LOGI("[Lua] Hook MUON lua_pcall OK"); g_hook_ok++; }
+                else     { LOGE("[Lua] Hook MUON lua_pcall FAIL"); g_hook_fail++; }
+            }
+        }
+        if (o_luaL_loadbufferx && o_lua_pcall) return nullptr;
     }
-    if (!o_luaL_loadbufferx) {
-        LOGE("[Lua] Sau 30s van KHONG THAY luaL_loadbufferx — danh sach tat ca lib:");
+    if (!o_luaL_loadbufferx || !o_lua_pcall) {
+        LOGE("[Lua] Sau 30s: luaL_loadbufferx=%s lua_pcall=%s — danh sach lib:",
+             o_luaL_loadbufferx ? "OK" : "FAIL", o_lua_pcall ? "OK" : "FAIL");
         dl_iterate_phdr([](struct dl_phdr_info* info, size_t, void*) -> int {
             if (info->dlpi_name && *info->dlpi_name) LOGI("[lib] %s", info->dlpi_name);
             return 0;
@@ -499,16 +508,13 @@ static void* lua_retry_thread(void*) {
 static void ResolveAll() {
     LOGI("=== Resolve START ===");
 
-    // [0/1/2] Lua dump + runtime patch — tìm luaL_loadbufferx + lua_pcall
+    // [0/1/2] Lua dump + runtime patch — hook luaL_loadbufferx + lua_pcall
     {
+        bool need_retry = false;
         void* lua_sym = FindSymAnywhere(OBFUSCATE("luaL_loadbufferx"));
         if (lua_sym) {
             bool ok = DoHook(lua_sym, (void*)h_luaL_loadbufferx, (void**)&o_luaL_loadbufferx, "luaL_loadbufferx");
-            if (ok) { g_hook_ok++; } else { g_hook_fail++; }
-            if (!f_lua_pcall) {
-                f_lua_pcall = (lua_pcall_t)FindSymAnywhere(OBFUSCATE("lua_pcall"));
-                LOGI("[Lua] lua_pcall: %s", f_lua_pcall ? "OK" : "KHONG THAY");
-            }
+            if (ok) { g_hook_ok++; } else { g_hook_fail++; need_retry = true; }
         } else {
             LOGI("[Lua] Chua thay luaL_loadbufferx — lib 'lua' dang nap:");
             dl_iterate_phdr([](struct dl_phdr_info* info, size_t, void*) -> int {
@@ -516,6 +522,17 @@ static void ResolveAll() {
                     LOGI("[Lua?] %s", info->dlpi_name);
                 return 0;
             }, nullptr);
+            need_retry = true;
+        }
+        void* pcall_sym = FindSymAnywhere(OBFUSCATE("lua_pcall"));
+        if (pcall_sym) {
+            bool ok2 = DoHook(pcall_sym, (void*)h_lua_pcall, (void**)&o_lua_pcall, "lua_pcall");
+            if (ok2) { g_hook_ok++; } else { g_hook_fail++; need_retry = true; }
+        } else {
+            LOGI("[Lua] Chua thay lua_pcall");
+            need_retry = true;
+        }
+        if (need_retry) {
             pthread_t pt; pthread_create(&pt, nullptr, lua_retry_thread, nullptr); pthread_detach(pt);
             LOGI("[Lua] Spawn retry thread OK");
         }
