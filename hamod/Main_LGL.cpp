@@ -3,11 +3,10 @@
 //  Test qua LGL Test Loader (máy root), sau đó ghép APK.
 //
 //  Tính năng (menu LGL):
-//    [AUTO] Dump Lua — tự dump mọi script vào LGL_logs/bxzyvn_lua/ (không cần toggle)
 //    [0]    Tang Sat Thuong — damage toggle
-//    [1]    He So Sat Thuong — seekbar 1-20 (runtime patch: calModifiedDamage trong Lua)
-//    [2]    Bat Tu (God Mode) — setCurHp patch (PlayerData Lua) + PatcherInfo.preRelease (IL2CPP)
-//    [3]    GM Mode — KCommand::Exec
+//    [1]    He So Sat Thuong — InputValue (gõ số bất kỳ, tối đa 9999999)
+//    [2]    Toc Do Tran — Spinner x1/x2/x3/x5 (hook Time.get_deltaTime)
+//    [3]    Bat Tu (God Mode) — calModifiedDamage trả 0 cho phe mình là target
 // ============================================================
 
 #define LOG_TAG      "BXZYVN_MOD"
@@ -266,8 +265,8 @@ static bool DoHook(void* addr, void* hook, void** orig, const char* name) {
 static bool  g_dmg     = false;
 static int   g_dmgmul  = 1;
 static bool  g_god     = false;
-static bool  g_gm      = false;
-static bool  g_nodebug = false;
+static bool  g_spd     = false;
+static int   g_spdmul  = 1;
 
 // Lua runtime patch (package.loaded: calModifiedDamage + setCurHp)
 typedef int (*lua_pcall_t)(void*, int, int, int);
@@ -291,50 +290,52 @@ static volatile int g_in_patch     = 0;         // re-entrancy guard cho ApplyRu
 typedef int (*luaL_loadbufferx_t)(void* L, const char* buff, size_t sz, const char* name, const char* mode);
 static luaL_loadbufferx_t o_luaL_loadbufferx = nullptr;
 
-// Inject Lua code vào Lua state để patch calModifiedDamage và setCurHp
-// Gọi TRƯỚC o_luaL_loadbufferx cho game script → stack clean khi gọi
-// Dùng outer pcall để absorb mọi lỗi runtime → stack luôn về 0 sau pcall
+// Inject Lua code vào Lua state để patch calModifiedDamage
+// - Damage multiplier: i.camp==EPlayerCamp.Attacker → nhân
+// - God mode: t.camp==EPlayerCamp.Attacker → trả 0 damage
+// Dùng outer pcall để absorb mọi lỗi runtime
 static void ApplyRuntimePatch(void* L) {
     if (!o_lua_pcall || !o_luaL_loadbufferx) return;
     char code[2048];
     snprintf(code, sizeof(code),
         "pcall(function()\n"
+        "  DU_lgl_mul=%d\n"
+        "  DU_lgl_god=%s\n"
         "  if not DU_lgl_orig then\n"
         "    local DU=nil\n"
         "    for _,v in pairs(package.loaded) do\n"
         "      if type(v)=='table' and type(v.calModifiedDamage)=='function' then DU=v;break end\n"
         "    end\n"
         "    if DU then\n"
-        "      DU_lgl_orig=DU.calModifiedDamage;DU_lgl_mul=%d\n"
+        "      DU_lgl_orig=DU.calModifiedDamage\n"
         "      DU.calModifiedDamage=function(i,t,d)\n"
         "        local r=DU_lgl_orig(i,t,d)\n"
+        "        if DU_lgl_god and t and t.camp==EPlayerCamp.Attacker then return 0 end\n"
         "        local m=DU_lgl_mul\n"
         "        if m and m>1 and i and i.camp==EPlayerCamp.Attacker then return r*m end\n"
         "        return r\n"
         "      end\n"
         "    end\n"
-        "  else DU_lgl_mul=%d end\n"
-        "  if not PD_lgl_patched then\n"
-        "    local PD=nil\n"
-        "    for _,v in pairs(package.loaded) do\n"
-        "      if type(v)=='table' and type(v.setCurHp)=='function'\n"
-        "      and type(v.checkInvincible)=='function' then PD=v;break end\n"
-        "    end\n"
-        "    if PD then\n"
-        "      PD_lgl_patched=true\n"
-        "      local o=PD.setCurHp\n"
-        "      PD.setCurHp=function(self,hp,d)\n"
-        "        if PD_lgl_god and self and self.camp==EPlayerCamp.Attacker then\n"
-        "          local ok,cur=pcall(self.getAttrVal,self,Battle.AttrEnum.CurHp)\n"
-        "          if ok and cur and hp<cur then return end\n"
-        "        end\n"
-        "        return o(self,hp,d)\n"
-        "      end\n"
-        "    end\n"
         "  end\n"
-        "  PD_lgl_god=%s\n"
+        "  if not LGL_diag_done then\n"
+        "    LGL_diag_done=true\n"
+        "    pcall(function()\n"
+        "      local f=io.open('/data/data/com.bxzyvn.gg/files/lgl_modules.txt','w')\n"
+        "      if f then\n"
+        "        for k,v in pairs(package.loaded) do\n"
+        "          if type(v)=='table' then\n"
+        "            f:write('=='..tostring(k)..'==\\n')\n"
+        "            for fk,fv in pairs(v) do\n"
+        "              if type(fv)=='function' then f:write('  '..tostring(fk)..'\\n') end\n"
+        "            end\n"
+        "          end\n"
+        "        end\n"
+        "        f:close()\n"
+        "      end\n"
+        "    end)\n"
+        "  end\n"
         "end)\n",
-        g_dmg ? g_dmgmul : 1, g_dmg ? g_dmgmul : 1, g_god ? "true" : "false"
+        g_dmg ? g_dmgmul : 1, g_god ? "true" : "false"
     );
     int r1 = o_luaL_loadbufferx(L, code, strlen(code), "@lgl_patch", nullptr);
     if (r1 != 0) { LOGE("[Patch] compile FAIL r=%d", r1); return; }
@@ -402,65 +403,17 @@ static int h_lua_pcall(void* L, int nargs, int nresults, int msgh) {
 }
 
 // ═══════════════════════════════════════════════════════════
-//  6. HOOK: PatcherInfo::Get — God Mode (IL2CPP backup)
-//  Cơ chế god mode CHÍNH: runtime Lua patch setCurHp trong PlayerData
-//  (ApplyRuntimePatch section 5)
-//  Hook này ghi PatcherInfo.preRelease = true — chức năng chưa xác nhận
-//  trong Lua nhưng giữ lại phòng trường hợp có effect native.
-//  dump.cs: public static PatcherInfo Get(); // 0x269C9A8
-//           public System.Boolean preRelease; // 0x30
+//  6. HOOK: Time.get_deltaTime — Tốc độ trận
+//  Nhân deltaTime → Lua SceneManager chạy nhiều tick hơn mỗi frame
+//  dump.cs: public static System.Single get_deltaTime()
 // ═══════════════════════════════════════════════════════════
-typedef void* (*PatcherInfo_Get_t)(void* mi);
-static PatcherInfo_Get_t o_PatcherInfo_Get = nullptr;
+typedef float (*get_deltaTime_t)(void*);
+static get_deltaTime_t o_get_deltaTime = nullptr;
 
-static void* h_PatcherInfo_Get(void* mi) {
-    T_COUNT(PatcherInfo_Get);
-    return o_PatcherInfo_Get ? o_PatcherInfo_Get(mi) : nullptr;
-}
-
-// ═══════════════════════════════════════════════════════════
-//  7. HOOK: DebugTool::RegisterDebugToolEntry — chặn debug (giữ nguyên)
-//  Instance method, argc=1 (Action action)
-//  dump.cs: public void RegisterDebugToolEntry(System.Action action)
-// ═══════════════════════════════════════════════════════════
-void (*o_RegisterDebugToolEntry)(void*, void*, void*) = nullptr;
-void  h_RegisterDebugToolEntry(void* self, void* action, void* mi) {
-    T_COUNT(RegisterDebugToolEntry);
-    if (g_nodebug) { LOGI("[DebugTool] RegisterDebugToolEntry blocked"); return; }
-    if (o_RegisterDebugToolEntry) o_RegisterDebugToolEntry(self, action, mi);
-}
-
-// ═══════════════════════════════════════════════════════════
-//  8. HOOK: KCommand::Exec — intercept lệnh game
-//  Static method, argc=1
-//  dump.cs: public static bool Exec(System.String cmd)
-// ═══════════════════════════════════════════════════════════
-bool (*o_KExec)(void*, void*) = nullptr;
-bool  h_KExec(void* cmd, void* mi) {
-    T_COUNT(KExec);
-    // Log lệnh để biết game dùng KCommand gì
-    // (cmd là Il2CppString: [0x10] = độ dài, [0x14+] = UTF-16)
-    if (cmd) {
-        int len = *(int*)((uintptr_t)cmd + 0x10);
-        if (len > 0 && len < 256) {
-            char buf[256] = {};
-            uint16_t* wstr = (uint16_t*)((uintptr_t)cmd + 0x14);
-            for (int i = 0; i < len && i < 255; i++) buf[i] = (char)wstr[i];
-            LOGI("[KCommand] Exec: \"%s\"", buf);
-        }
-    }
-    return o_KExec ? o_KExec(cmd, mi) : false;
-}
-
-// KCommand::Exec wrapper để inject lệnh từ GM mode
-// (Gọi thẳng o_KExec với Il2CppString tự tạo)
-static bool SendCommand(const char* cmd_utf8) {
-    if (!il2cpp_string_new || !o_KExec) return false;
-    void* s = il2cpp_string_new(cmd_utf8);
-    if (!s) return false;
-    bool r = o_KExec(s, nullptr);
-    LOGI("[KCommand] Inject \"%s\" -> %d", cmd_utf8, r);
-    return r;
+static float h_get_deltaTime(void* mi) {
+    T_COUNT(get_deltaTime);
+    float dt = o_get_deltaTime ? o_get_deltaTime(mi) : 0.016f;
+    return (g_spd && g_spdmul > 1) ? dt * g_spdmul : dt;
 }
 
 // thread thử lại hook luaL_loadbufferx + lua_pcall — chạy vô hạn cho đến khi tìm được
@@ -538,13 +491,8 @@ static void ResolveAll() {
         }
     }
 
-    // [3] God Mode — PatcherInfo::Get (static, 0 params)
-    // dump.cs: public static PatcherInfo Get(); — no namespace
-    T_HOOK("", "PatcherInfo", "Get", 0, PatcherInfo_Get);
-
-    // Debug/GM hooks
-    T_HOOK("", "DebugTool", "RegisterDebugToolEntry", 1, RegisterDebugToolEntry);
-    T_HOOK("", "KCommand",  "Exec", 1, KExec);
+    // [2] Speed — Time.get_deltaTime (UnityEngine)
+    T_HOOK("UnityEngine", "Time", "get_deltaTime", 0, get_deltaTime);
 
     TraceReport();
     LOGI("=== Resolve DONE ===");
@@ -557,9 +505,9 @@ jobjectArray GetFeatureList(JNIEnv* env, jobject) {
     const char* features[] = {
         OBFUSCATE("Category_" GAME_NAME),
         OBFUSCATE("0_Toggle_Tang Sat Thuong"),
-        OBFUSCATE("1_SeekBar_He So Sat Thuong_1_20"),
-        OBFUSCATE("2_Toggle_Bat Tu (God Mode)"),
-        OBFUSCATE("3_Toggle_GM Mode"),
+        OBFUSCATE("1_InputValue_He So Sat Thuong"),
+        OBFUSCATE("2_Spinner_Toc Do Tran_x1,x2,x3,x5"),
+        OBFUSCATE("3_Toggle_Bat Tu (God Mode)"),
     };
     int total = sizeof(features) / sizeof(features[0]);
     jobjectArray ret = env->NewObjectArray(
@@ -576,26 +524,31 @@ void Changes(JNIEnv* env, jclass, jobject,
              jint featNum, jstring featName, jint value, jboolean boolean, jstring str) {
     T_STEP("bam tinh nang so %d (value=%d, bat=%d)", featNum, value, boolean);
     LOGI("Menu: tinh nang %d -> value=%d bat=%d", featNum, value, boolean);
+    static const int spd_table[] = {1, 2, 3, 5};
     switch (featNum) {
         case 0:
             g_dmg = boolean;
             LOGI("Damage Mod: %s (x%d)", g_dmg ? "BAT" : "TAT", g_dmgmul);
-            // Cập nhật Lua globals khi Lua call tiếp theo (cần Lua thread)
             g_patch_needed = 1;
             break;
-        case 1:
-            g_dmgmul = (value < 1) ? 1 : (value > 20 ? 20 : value);
+        case 1: {
+            int v = (value < 1) ? 1 : (value > 9999999 ? 9999999 : value);
+            g_dmgmul = v;
             LOGI("Damage Multiplier: x%d", g_dmgmul);
             g_patch_needed = 1;
             break;
-        case 2:
+        }
+        case 2: {
+            int idx = (value < 0) ? 0 : (value > 3 ? 3 : value);
+            g_spdmul = spd_table[idx];
+            g_spd = (g_spdmul > 1);
+            LOGI("Speed: x%d (idx=%d)", g_spdmul, idx);
+            break;
+        }
+        case 3:
             g_god = boolean;
             LOGI("God Mode: %s", g_god ? "BAT" : "TAT");
             g_patch_needed = 1;
-            break;
-        case 3:
-            g_gm = boolean;
-            LOGI("GM Mode: %s", g_gm ? "BAT" : "TAT");
             break;
     }
 }
