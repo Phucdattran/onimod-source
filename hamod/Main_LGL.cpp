@@ -278,42 +278,39 @@ static bool  g_nodebug = false;
 typedef int (*luaL_loadbufferx_t)(void* L, const char* buff, size_t sz, const char* name, const char* mode);
 static luaL_loadbufferx_t o_luaL_loadbufferx = nullptr;
 
-// Patch AnimEvtUtil.lua: nhân damage trong injurePlayer
-// Dòng cần patch (AnimEvtUtil.lua ~line 579):
-//   attackData["damage"] = damageData.damage;
-// → thành:
-//   attackData["damage"] = damageData.damage * N;
+// Patch hàm M.calModifiedDamage trong Lua: nhân damage
+// Pattern từ libonavhtny.so — file này chỉ load khi VÀO TRẬN (không phải lobby)
+// → chèn "    damage = damage * N;\r\n" ngay sau dòng khai báo hàm
 static const char* lua_patch_dmg(const char* buff, size_t sz, size_t* out_sz, const char* name) {
-    if (!name || !strstr(name, "AnimEvtUtil")) return nullptr;
+    static const char NEEDLE_CRLF[] = "function M.calModifiedDamage(instigator, target, damage)\r\n";
+    static const char NEEDLE_LF[]   = "function M.calModifiedDamage(instigator, target, damage)\n";
 
-    static const char NEEDLE[] = "attackData[\"damage\"] = damageData.damage;";
-    const size_t nlen = sizeof(NEEDLE) - 1;
+    const char* found = nullptr;
+    size_t needle_len = 0;
+    if ((found = (const char*)memmem(buff, sz, NEEDLE_CRLF, sizeof(NEEDLE_CRLF)-1)))
+        needle_len = sizeof(NEEDLE_CRLF)-1;
+    else if ((found = (const char*)memmem(buff, sz, NEEDLE_LF, sizeof(NEEDLE_LF)-1)))
+        needle_len = sizeof(NEEDLE_LF)-1;
 
-    const char* found = (const char*)memmem(buff, sz, NEEDLE, nlen);
-    if (!found) {
-        LOGE("[Dmg] KHONG THAY needle trong '%s' (game doi code?)", name);
-        return nullptr;
-    }
+    if (!found) return nullptr;
 
-    char repl[128];
-    int rlen = snprintf(repl, sizeof(repl),
-        "attackData[\"damage\"] = damageData.damage * %d;", g_dmgmul);
+    char inject[64];
+    int injlen = snprintf(inject, sizeof(inject), "    damage = damage * %d;\r\n", g_dmgmul);
 
-    size_t before = (size_t)(found - buff);
-    size_t after  = sz - before - nlen;
-    size_t new_sz = before + (size_t)rlen + after;
-
+    size_t new_sz = sz + (size_t)injlen;
     void* p = mmap(nullptr, new_sz, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (p == MAP_FAILED) return nullptr;
 
-    memcpy((char*)p,                         buff,         before);
-    memcpy((char*)p + before,                repl,         (size_t)rlen);
-    memcpy((char*)p + before + (size_t)rlen, found + nlen, after);
+    const char* fn_end = found + needle_len;
+    size_t head = (size_t)(fn_end - buff);
+    memcpy((char*)p,                              buff,   head);
+    memcpy((char*)p + head,                       inject, (size_t)injlen);
+    memcpy((char*)p + head + (size_t)injlen,      fn_end, sz - head);
 
     mprotect(p, new_sz, PROT_READ);
     *out_sz = new_sz;
-    LOGI("[Dmg] patch AnimEvtUtil x%d trong '%s' (%zu->%zu byte)",
-         g_dmgmul, name, sz, new_sz);
+    LOGI("[Dmg] patch M.calModifiedDamage x%d trong '%s' (%zu->%zu byte)",
+         g_dmgmul, name ? name : "?", sz, new_sz);
     return (const char*)p;
 }
 
@@ -347,10 +344,6 @@ static int h_luaL_loadbufferx(void* L, const char* buff, size_t sz, const char* 
             LOGI("[Lua] dump: %s (%zu bytes)", cname, sz);
         }
     }
-
-    // Log riêng khi AnimEvtUtil được load (để biết hook có kịp không)
-    if (name && strstr(name, "AnimEvtUtil"))
-        LOGI("[Lua] AnimEvtUtil loaded: g_dmg=%d g_dmgmul=%d", g_dmg, g_dmgmul);
 
     if (g_dmg && g_dmgmul > 1) {
         size_t new_sz = sz;
