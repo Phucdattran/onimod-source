@@ -159,17 +159,29 @@ static int find_sym_cb(struct dl_phdr_info* info, size_t, void* data) {
     if (!dyn) return 0;
 
     const ElfW(Sym)* symtab = nullptr; const char* strtab = nullptr;
-    const uint32_t* sysv = nullptr;
+    const uint32_t* gnu = nullptr; const uint32_t* sysv = nullptr;
     for (const ElfW(Dyn)* d = dyn; d->d_tag != DT_NULL; ++d) {
         switch (d->d_tag) {
-            case DT_SYMTAB: symtab = (const ElfW(Sym)*) fix(d->d_un.d_ptr); break;
-            case DT_STRTAB: strtab = (const char*)      fix(d->d_un.d_ptr); break;
-            case DT_HASH:   sysv   = (const uint32_t*)  fix(d->d_un.d_ptr); break;
+            case DT_SYMTAB:   symtab = (const ElfW(Sym)*) fix(d->d_un.d_ptr); break;
+            case DT_STRTAB:   strtab = (const char*)      fix(d->d_un.d_ptr); break;
+            case DT_GNU_HASH: gnu    = (const uint32_t*)  fix(d->d_un.d_ptr); break;
+            case DT_HASH:     sysv   = (const uint32_t*)  fix(d->d_un.d_ptr); break;
         }
     }
-    if (!symtab || !strtab || !sysv) return 0;
-    uint32_t nsyms = sysv[1];
-    for (uint32_t i = 0; i < nsyms; i++) {
+    if (!symtab || !strtab || (!gnu && !sysv)) return 0;
+    size_t nsyms = 0;
+    if (sysv) {
+        nsyms = sysv[1];
+    } else {
+        uint32_t nbuckets = gnu[0], symoff = gnu[1], bloom = gnu[2];
+        const uint32_t* buckets = gnu + 4 + bloom * (sizeof(ElfW(Addr)) / 4);
+        const uint32_t* chain = buckets + nbuckets;
+        uint32_t last = 0;
+        for (uint32_t b = 0; b < nbuckets; b++) if (buckets[b] > last) last = buckets[b];
+        if (last >= symoff) while (!(chain[last - symoff] & 1)) last++;
+        nsyms = last + 1;
+    }
+    for (size_t i = 0; i < nsyms; i++) {
         const ElfW(Sym)& s = symtab[i];
         if (!s.st_name || s.st_shndx == SHN_UNDEF || !s.st_value) continue;
         if (strcmp(strtab + s.st_name, ctx->name) == 0) {
