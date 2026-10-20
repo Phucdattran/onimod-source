@@ -398,7 +398,7 @@ void h_BuyIAPProduct(void* self, void* bundle, void* customValidator,
             if (pm) {
                 int32_t result = g_PM_OnPurchaseComplete(pm, productId_str, 0,
                                                           g_PM_OnPurchaseComplete_mi);
-                LOGI("[FreeShop] OnPurchaseComplete: result=%d", result);
+                LOGI("[FreeShop] OnPurchaseComplete(Bundle): result=%d", result);
                 return;
             }
             LOGE("[FreeShop] PurchaseManager instance null");
@@ -408,6 +408,26 @@ void h_BuyIAPProduct(void* self, void* bundle, void* customValidator,
         }
     }
     if (o_BuyIAPProduct) o_BuyIAPProduct(self, bundle, customValidator, storeId, mi);
+}
+
+// Hook IAPMediator.BuyIAPProduct(String productId, IPurchaseValidator, Dictionary)
+void (*o_BuyIAPProduct_str)(void*, void*, void*, void*, void*) = nullptr;
+void h_BuyIAPProduct_str(void* self, void* productId_str, void* customValidator,
+                          void* contextProps, void* mi) {
+    if (g_feature0.load(std::memory_order_acquire)) {
+        if (productId_str && g_PM_GetInstance && g_PM_OnPurchaseComplete) {
+            void* pm = g_PM_GetInstance(g_PM_GetInstance_mi);
+            if (pm) {
+                int32_t result = g_PM_OnPurchaseComplete(pm, productId_str, 0,
+                                                          g_PM_OnPurchaseComplete_mi);
+                LOGI("[FreeShop] OnPurchaseComplete(String): result=%d", result);
+                return;
+            }
+            LOGE("[FreeShop-str] PurchaseManager instance null");
+        }
+    }
+    if (o_BuyIAPProduct_str) o_BuyIAPProduct_str(self, productId_str, customValidator,
+                                                    contextProps, mi);
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -487,27 +507,52 @@ void* h_t(void*) {
         if (!g_PM_OnPurchaseComplete)
             LOGE("[FreeShop] PurchaseManager NOT FOUND in any assembly");
 
-        // 2. IAPMediator.BuyIAPProduct(Bundle, IPurchaseValidator, StoreIdentifier) — 3 params
-        bool hooked_buy = false;
-        for (size_t i = 0; i < count && !hooked_buy; ++i) {
+        // 2. IAPMediator — hook cả 2 overload BuyIAPProduct(3 params)
+        //    - BuyIAPProduct(Bundle, IPurchaseValidator, StoreIdentifier)
+        //    - BuyIAPProduct(String productId, IPurchaseValidator, Dictionary)
+        //    il2cpp_class_get_method_from_name chỉ trả 1 cái → dùng get_methods để lấy cả 2
+        bool found_mediator = false;
+        for (size_t i = 0; i < count && !found_mediator; ++i) {
             void* img = il2cpp_assembly_get_image(assemblies[i]);
             if (!img) continue;
             void* klass = il2cpp_class_from_name(img, OBFUSCATE("Voodoo.Sauce.IAP"),
                                                   OBFUSCATE("IAPMediator"));
-            if (!klass) continue;
-            void* m = il2cpp_class_get_method_from_name(klass,
-                          OBFUSCATE("BuyIAPProduct"), 3);
-            if (!m) {
-                LOGE("[FreeShop] IAPMediator.BuyIAPProduct(3) NOT FOUND");
-                continue;
+            if (!klass || !il2cpp_class_get_methods) continue;
+            found_mediator = true;
+            void* iter = nullptr;
+            while (void* m = il2cpp_class_get_methods(klass, &iter)) {
+                if (!il2cpp_method_get_name || !il2cpp_method_get_param_count) continue;
+                const char* name = il2cpp_method_get_name(m);
+                if (!name || strcmp(name, "BuyIAPProduct") != 0) continue;
+                uint32_t np = il2cpp_method_get_param_count(m);
+                if (np != 3) continue;
+                uintptr_t addr = m ? (uintptr_t)*(void**)m : 0;
+                if (!addr) continue;
+                // Distinguish: first param type → Bundle (object) vs String
+                // Dùng il2cpp_method_get_param để kiểm tra type
+                bool is_bundle_overload = false;
+                if (il2cpp_method_get_param && il2cpp_type_get_type) {
+                    void* p0 = il2cpp_method_get_param(m, 0);
+                    int t = p0 ? il2cpp_type_get_type(p0) : -1;
+                    // IL2CPP_TYPE_CLASS = 0x12, IL2CPP_TYPE_STRING = 0x0E
+                    is_bundle_overload = (t == 0x12);
+                } else {
+                    is_bundle_overload = !o_BuyIAPProduct; // fallback: hook đầu tiên là Bundle
+                }
+                if (is_bundle_overload && !o_BuyIAPProduct) {
+                    installed += DoHook((void*)addr, (void*)h_BuyIAPProduct,
+                                       (void**)&o_BuyIAPProduct,
+                                       "IAPMediator.BuyIAPProduct(Bundle)") ? 1 : 0;
+                } else if (!is_bundle_overload && !o_BuyIAPProduct_str) {
+                    installed += DoHook((void*)addr, (void*)h_BuyIAPProduct_str,
+                                       (void**)&o_BuyIAPProduct_str,
+                                       "IAPMediator.BuyIAPProduct(String)") ? 1 : 0;
+                }
             }
-            uintptr_t addr_buy = (uintptr_t)*(void**)m;
-            hooked_buy = DoHook((void*)addr_buy, (void*)h_BuyIAPProduct,
-                                (void**)&o_BuyIAPProduct,
-                                "IAPMediator.BuyIAPProduct");
-            installed += hooked_buy ? 1 : 0;
+            if (!o_BuyIAPProduct && !o_BuyIAPProduct_str)
+                LOGE("[FreeShop] BuyIAPProduct not hookable in IAPMediator");
         }
-        if (!hooked_buy)
+        if (!found_mediator)
             LOGE("[FreeShop] IAPMediator NOT FOUND in any assembly");
     }
 
