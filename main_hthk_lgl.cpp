@@ -1,12 +1,12 @@
 // LGL May Root — Hải Tặc Truyền Kỳ (com.hhkb.rpg.gp)
-// Hook luaL_loadbufferx trong libtolua.so, inject wrapper Lua cho:
-//   - battle.battlemanager        (tốc độ)
-//   - battle.skill.base.object.attackresultdata (sát thương)
-//   - game.sdk.adsystem           (bỏ quảng cáo)
 #define LOG_TAG      "HTHK_MOD"
-#define GAME_NAME    "⚔️ Hải Tặc Truyền Kỳ"
+#define GAME_NAME    "Hai Tac Truyen Ky"
 #define GAME_PACKAGE "com.hhkb.rpg.gp"
 #include "Includes/LGLTrace.h"
+
+#include <jni.h>
+bool isGameReady = false;
+static jboolean my_isGameLibLoaded(JNIEnv*,jobject){return isGameReady?JNI_TRUE:JNI_FALSE;}
 
 #include <pthread.h>
 #include <unistd.h>
@@ -29,491 +29,533 @@
 #include "Includes/obfuscate.h"
 #include <Dobby/dobby.h>
 
-// ═══════════════════════════════════════════════════════════
-//  Trạng thái menu (đọc/ghi từ Changes() + hook)
-//    g_dmg: 0=×1  1=×2  2=×5  3=×20
-//    g_spd: 0=×1  1=×3  2=×5  3=×10
-//    g_ads: true = bỏ xem video
-// ═══════════════════════════════════════════════════════════
-static std::atomic<int>  g_dmg{0};
-static std::atomic<int>  g_spd{0};
-static std::atomic<bool> g_ads{false};
+// ── State ──────────────────────────────────────────────────────────────────
+static std::atomic<int>   g_dmg{1};
+static std::atomic<int>   g_spd{0};
+static std::atomic<bool>  g_ads{false};
+static std::atomic<float> g_ts_game{1.0f};
+static const float SPD_MUL[4] = {1.0f, 3.0f, 5.0f, 10.0f};
 
-// ═══════════════════════════════════════════════════════════
-//  libtolua.so ELF image tracking
-// ═══════════════════════════════════════════════════════════
-struct ToluaImage {
-    uintptr_t         base  = 0;
-    const ElfW(Phdr)* phdr  = nullptr;
-    size_t            phnum = 0;
-    const char*       path  = nullptr;
-};
-static ToluaImage g_tolua;
+// ── Lua API (từ libtolua.so) ───────────────────────────────────────────────
+typedef int (*lua_CFunction)(void*);
+static void        (*l_pushcclosure)(void*, lua_CFunction, int) = nullptr;
+static void        (*l_setglobal)(void*, const char*)           = nullptr;
+static void        (*l_setfield)(void*, int, const char*)       = nullptr;
+static void        (*l_pushnumber)(void*, double)               = nullptr;
+static double      (*l_tonumber)(void*, int)                    = nullptr;
+static const char* (*l_tolstring)(void*, int, size_t*)          = nullptr;
+static void        (*l_settop)(void*, int)                      = nullptr;
+static int         (*l_gettop)(void*)                           = nullptr;
+#define L_GLOBALSINDEX (-10002)  // Lua 5.1; dùng lua_setglobal nếu 5.3
 
-static bool TC(uintptr_t addr, size_t sz, unsigned flags = PF_R) {
-    if (!addr || !sz || !g_tolua.phdr) return false;
-    for (size_t i = 0; i < g_tolua.phnum; ++i) {
-        const ElfW(Phdr)& p = g_tolua.phdr[i];
-        if (p.p_type != PT_LOAD || (p.p_flags & flags) != flags) continue;
-        uintptr_t s = g_tolua.base + p.p_vaddr;
-        if (addr >= s && addr - s <= p.p_memsz - sz) return true;
-    }
-    return false;
-}
-static bool TRu32(uintptr_t a, uint32_t* v) {
-    if (!TC(a, 4)) return false;
-    memcpy(v, (const void*)a, 4); return true;
-}
-static uintptr_t TDA(ElfW(Addr) val, size_t sz) {
-    if (!val) return 0;
-    if (TC(val, sz)) return val;
-    uintptr_t a = g_tolua.base + val;
-    return TC(a, sz) ? a : 0;
-}
-static uintptr_t TAA(uintptr_t b, size_t i, size_t st) {
-    return (b && st) ? b + i*st : 0;
+static std::map<std::string, std::vector<char>> g_orig_bufs;
+static std::mutex g_buf_mtx;
+
+static int c_hthk_log(void* L) {
+    size_t n = 0;
+    const char* msg = l_tolstring ? l_tolstring(L, 1, &n) : nullptr;
+    if (msg) LOGI("[LUA] %s", msg);
+    return 0;
 }
 
-// ═══════════════════════════════════════════════════════════
-//  ELF symbol resolver (GNU_HASH + SYSV_HASH)
-// ═══════════════════════════════════════════════════════════
-class ToluaExports {
-    uintptr_t sym_=0, str_=0, sysv_=0, gnu_=0;
-    size_t    ssz_=0;
-
-    void* SA(uint32_t idx, const char* nm) const {
-        uintptr_t a = TAA(sym_, idx, sizeof(ElfW(Sym)));
-        if (!TC(a, sizeof(ElfW(Sym)))) return nullptr;
-        ElfW(Sym) s; memcpy(&s, (const void*)a, sizeof(s));
-        if (s.st_shndx == SHN_UNDEF || s.st_name >= ssz_) return nullptr;
-        unsigned ty = s.st_info & 0xf, bi = s.st_info >> 4;
-        if ((ty != STT_FUNC && ty != STT_NOTYPE) ||
-            (bi != STB_GLOBAL && bi != STB_WEAK)) return nullptr;
-        size_t nl = strlen(nm)+1;
-        if (nl > ssz_ - s.st_name) return nullptr;
-        if (memcmp((const void*)(str_ + s.st_name), nm, nl)) return nullptr;
-        uintptr_t fn = (s.st_shndx == SHN_ABS) ? s.st_value
-                                                 : (g_tolua.base + s.st_value);
-        return TC(fn, 1, PF_X) ? (void*)fn : nullptr;
-    }
-public:
-    bool Init() {
-        uintptr_t dyn=0; size_t cnt=0;
-        for (size_t i = 0; i < g_tolua.phnum; ++i) {
-            const ElfW(Phdr)& p = g_tolua.phdr[i];
-            if (p.p_type != PT_DYNAMIC) continue;
-            dyn = g_tolua.base + p.p_vaddr;
-            cnt = p.p_memsz / sizeof(ElfW(Dyn)); break;
-        }
-        if (!cnt || !TC(dyn, cnt*sizeof(ElfW(Dyn)))) return false;
-        const ElfW(Dyn)* d = (const ElfW(Dyn)*)dyn;
-        ElfW(Addr) sym=0, str=0, sv=0, gn=0;
-        size_t stride=sizeof(ElfW(Sym)); bool term=false;
-        for (size_t i = 0; i < cnt; ++i) {
-            if (d[i].d_tag == DT_NULL) { term=true; break; }
-            switch(d[i].d_tag) {
-                case DT_SYMTAB:   sym=d[i].d_un.d_ptr; break;
-                case DT_STRTAB:   str=d[i].d_un.d_ptr; break;
-                case DT_STRSZ:    ssz_=d[i].d_un.d_val; break;
-                case DT_SYMENT:   stride=d[i].d_un.d_val; break;
-                case DT_HASH:     sv=d[i].d_un.d_ptr; break;
-                case DT_GNU_HASH: gn=d[i].d_un.d_ptr; break;
-            }
-        }
-        if (!term || stride!=sizeof(ElfW(Sym)) || !ssz_) return false;
-        sym_=TDA(sym,sizeof(ElfW(Sym))); str_=TDA(str,ssz_);
-        sysv_=TDA(sv,8); gnu_=TDA(gn,16);
-        return sym_ && str_ && (gnu_ || sysv_);
-    }
-
-    void* Find(const char* nm) const {
-        if (!nm || !sym_ || !str_) return nullptr;
-        if (gnu_) {
-            uint32_t bc=0, fs=0, bl=0;
-            TRu32(gnu_,&bc); TRu32(gnu_+4,&fs); TRu32(gnu_+8,&bl);
-            uintptr_t bkts=TAA(gnu_+16,bl,sizeof(ElfW(Addr)));
-            uintptr_t chns=TAA(bkts,bc,4);
-            if (bc && bl && bkts && chns) {
-                uint32_t h=5381, bv=0;
-                for (const unsigned char* p=(const unsigned char*)nm; *p; ++p) h=h*33+*p;
-                if (TRu32(TAA(bkts,h%bc,4),&bv) && bv>=fs) {
-                    for (size_t s=0; s<1048576 && bv!=UINT32_MAX; ++s,++bv) {
-                        uint32_t cv=0;
-                        if (!TRu32(TAA(chns,bv-fs,4),&cv)) break;
-                        if ((cv|1u)==(h|1u)) { void* f=SA(bv,nm); if (f) return f; }
-                        if (cv&1u) break;
-                    }
-                }
-            }
-        }
-        if (sysv_) {
-            uint32_t bc=0, sc=0, bv=0;
-            TRu32(sysv_,&bc); TRu32(sysv_+4,&sc);
-            uintptr_t bkts=sysv_+8, chns=TAA(bkts,bc,4);
-            if (bc && sc && chns) {
-                uint32_t h=0;
-                for (const unsigned char* p=(const unsigned char*)nm; *p; ++p) {
-                    h=(h<<4)+*p; uint32_t hi=h&0xf0000000u;
-                    if (hi) h^=hi>>24; h&=~hi;
-                }
-                if (TRu32(TAA(bkts,h%bc,4),&bv)) {
-                    for (size_t s=0; bv && bv<sc && s<1048576; ++s) {
-                        void* f=SA(bv,nm); if (f) return f;
-                        if (!TRu32(TAA(chns,bv,4),&bv)) break;
-                    }
-                }
-            }
-        }
-        return nullptr;
-    }
-};
-
-static bool FindTolua() {
-    bool found = false;
-    dl_iterate_phdr([](struct dl_phdr_info* info, size_t, void* data) -> int {
-        if (!info->dlpi_name || !info->dlpi_phdr || !info->dlpi_phnum) return 0;
-        const char* leaf = strrchr(info->dlpi_name, '/');
-        leaf = leaf ? leaf+1 : info->dlpi_name;
-        if (strcmp(leaf, "libtolua.so") != 0) return 0;
-        g_tolua = {info->dlpi_addr, info->dlpi_phdr, (size_t)info->dlpi_phnum,
-                   info->dlpi_name};
-        *static_cast<bool*>(data) = true;
-        return 1;
-    }, &found);
-    return found;
-}
-
-// ═══════════════════════════════════════════════════════════
-//  Lua API (opaque state, function pointers)
-// ═══════════════════════════════════════════════════════════
-typedef struct lua_State lua_State;
-typedef int (*lua_CFunction)(lua_State*);
-
-static void        (*f_settop)      (lua_State*, int)                = nullptr;
-static void        (*f_pushnumber)  (lua_State*, double)             = nullptr;
-static void        (*f_pushcclosure)(lua_State*, lua_CFunction, int) = nullptr;
-static void        (*f_setglobal)   (lua_State*, const char*)        = nullptr;
-static double      (*f_tonumberx)   (lua_State*, int, int*)          = nullptr;
-static const char* (*f_tolstring)   (lua_State*, int, size_t*)       = nullptr;
-
-static int (*o_loadbufferx)(lua_State*, const char*, size_t,
-                             const char*, const char*) = nullptr;
-
-// ═══════════════════════════════════════════════════════════
-//  Original bytecode storage (per module name)
-// ═══════════════════════════════════════════════════════════
-static std::mutex                               g_buf_mu;
-static std::map<std::string, std::vector<char>> g_orig_buf;
-
-// ═══════════════════════════════════════════════════════════
-//  Lua C functions
-// ═══════════════════════════════════════════════════════════
-
-// __hthk_orig_load(name) → chunk function on stack
-static int c_orig_load(lua_State* L) {
-    if (!o_loadbufferx) return 0;
-    const char* name = f_tolstring ? f_tolstring(L, 1, nullptr) : nullptr;
-    if (!name) return 0;
-    std::vector<char> buf;
-    {
-        std::lock_guard<std::mutex> lk(g_buf_mu);
-        auto it = g_orig_buf.find(name);
-        if (it == g_orig_buf.end()) {
-            LOGE("[HTHK] c_orig_load: no buffer '%s'", name);
-            return 0;
-        }
-        buf = it->second;
-    }
-    int rc = o_loadbufferx(L, buf.data(), buf.size(), name, "b");
-    if (rc != 0) {
-        LOGE("[HTHK] c_orig_load: load FAIL rc=%d '%s'", rc, name);
-        if (f_settop) f_settop(L, 0);
-        return 0;
-    }
-    return 1;
-}
-
-// __hthk_num(index) → number  (0=dmg, 1=spd, 2=ads)
-static int c_hthk_num(lua_State* L) {
-    int idx = 0;
-    if (f_tonumberx) {
-        int isnum = 0;
-        double v = f_tonumberx(L, 1, &isnum);
-        if (isnum) idx = (int)v;
-    }
-    double val = 0.0;
+static int c_hthk_num(void* L) {
+    int idx = l_tonumber ? (int)l_tonumber(L, 1) : 0;
+    double val = 0;
     switch (idx) {
         case 0: val = (double)g_dmg.load(std::memory_order_relaxed); break;
         case 1: val = (double)g_spd.load(std::memory_order_relaxed); break;
         case 2: val = g_ads.load(std::memory_order_relaxed) ? 1.0 : 0.0; break;
     }
-    if (f_pushnumber) f_pushnumber(L, val);
+    if (l_pushnumber) l_pushnumber(L, val);
     return 1;
 }
 
-// ═══════════════════════════════════════════════════════════
-//  Lua wrappers
-// ═══════════════════════════════════════════════════════════
-static const char WRAP_BATTLEMANAGER[] = R"LUA(
-local NAME = "battle.battlemanager"
-local chunk = assert(__hthk_orig_load(NAME), "hthk: orig nil " .. NAME)
-local BattleManager = chunk(...)
-if type(BattleManager) ~= "table" or type(BattleManager.GetBattleSpeed) ~= "function" then
-  return BattleManager
-end
-local LEVELS = {1, 3, 5, 10}
-local _get = BattleManager.GetBattleSpeed
-function BattleManager:GetBattleSpeed()
-  local base = _get(self)
-  local lv = __hthk_num(1)
-  local m = LEVELS[math.floor(lv) + 1] or 1
-  if m <= 1 then return base end
-  if type(base) ~= "number" or base <= 0 then return base end
-  return base * m
-end
-return BattleManager
-)LUA";
+// forward declare — o_lua_load defined later
+typedef int (*t_lua_load2)(void*, const char*, size_t, const char*, const char*);
+static t_lua_load2 o_lua_load_fwd = nullptr;
 
-static const char WRAP_ATTACKRESULT[] = R"LUA(
-local NAME = "battle.skill.base.object.attackresultdata"
-local chunk = assert(__hthk_orig_load(NAME), "hthk: orig nil " .. NAME)
-local AttackResultData = chunk(...)
-if type(AttackResultData) ~= "table" or type(AttackResultData.GetHurtVal) ~= "function" then
-  return AttackResultData
-end
-local DMG = {1, 2, 5, 20}
-local function team_of(p)
-  if type(p) ~= "table" or type(p.GetTeamId) ~= "function" then return nil end
-  local ok, t = pcall(function() return p:GetTeamId() end)
-  return ok and t or nil
-end
-local _get = AttackResultData.GetHurtVal
-function AttackResultData:GetHurtVal()
-  local v = _get(self)
-  local lv = __hthk_num(0)
-  local m = DMG[math.floor(lv) + 1] or 1
-  if m <= 1 or type(v) ~= "number" or v <= 0 then return v end
-  local atk, def
-  pcall(function() atk = team_of(self:GetMaster()) end)
-  pcall(function() def = team_of(self:GetTarget()) end)
-  if atk ~= 1 or def == nil or def == 1 then return v end
-  return v * m
-end
-return AttackResultData
-)LUA";
+static int c_hthk_orig_load(void* L) {
+    int top = l_gettop ? l_gettop(L) : -1;
+    size_t nl = 0;
+    const char* name = l_tolstring ? l_tolstring(L, 1, &nl) : nullptr;
+    if (!name) return 0;
+    std::unique_lock<std::mutex> lock(g_buf_mtx);
+    auto it = g_orig_bufs.find(std::string(name));
+    if (it == g_orig_bufs.end()) return 0;
+    std::vector<char> copy = it->second;
+    lock.unlock();
+    if (!o_lua_load_fwd) return 0;
+    int r = o_lua_load_fwd(L, copy.data(), copy.size(), name, "bt");
+    if (r != 0) { if (l_settop && top >= 0) l_settop(L, top); return 0; }
+    return 1;
+}
 
-static const char WRAP_ADSYSTEM[] = R"LUA(
-local NAME = "game.sdk.adsystem"
-local chunk = assert(__hthk_orig_load(NAME), "hthk: orig nil " .. NAME)
-local AD = chunk(...)
-if type(AD) ~= "table" or type(AD.ShowRewardAd) ~= "function" then return AD end
-local function on() return __hthk_num(2) >= 1 end
-local _show  = AD.ShowRewardAd
-local _init  = AD.IsInitRewardAd
-local _avail = AD.IsRewardAdAvailable
-local _param = AD.SetRewardAdParam
-AD.IsInitRewardAd = function(...)
-  if on() then return true end
-  if _init then return _init(...) end
-end
-AD.IsRewardAdAvailable = function(...)
-  if on() then return true end
-  if _avail then return _avail(...) end
-end
-AD.SetRewardAdParam = function(...)
-  if not on() then if _param then return _param(...) end; return end
-  pcall(_param, ...)
-end
-local function fire(fn, evt)
-  if type(fn) == "function" then
-    local ok = pcall(fn)
-    if ok then return true end
-  end
-  if x_eventManager and _EventType and evt and _EventType[evt] then
-    local id = _EventType[evt]
-    pcall(function() x_eventManager:postEvent(id) end)
-  end
-end
-AD.ShowRewardAd = function(...)
-  if not on() then return _show(...) end
-  fire(AD.OnRewardAdOpened,          "Event_RewardAd_Open")
-  fire(AD.OnAdRewardSuccessCallBack, "Event_RewardAd_ShowEnd")
-  fire(AD.OnRewardAdClosed,          "Event_RewardAd_Close")
-  return true
-end
-return AD
-)LUA";
+static void lua_reg_helpers(void* L) {
+    if (!l_pushcclosure) return;
+    if (l_setglobal) {
+        l_pushcclosure(L, c_hthk_num, 0);
+        l_setglobal(L, "__hthk_num");
+        l_pushcclosure(L, c_hthk_orig_load, 0);
+        l_setglobal(L, "__hthk_orig_load");
+        l_pushcclosure(L, c_hthk_log, 0);
+        l_setglobal(L, "__hthk_log");
+    } else if (l_setfield) {
+        l_pushcclosure(L, c_hthk_num, 0);
+        l_setfield(L, L_GLOBALSINDEX, "__hthk_num");
+        l_pushcclosure(L, c_hthk_orig_load, 0);
+        l_setfield(L, L_GLOBALSINDEX, "__hthk_orig_load");
+        l_pushcclosure(L, c_hthk_log, 0);
+        l_setfield(L, L_GLOBALSINDEX, "__hthk_log");
+    }
+}
 
-struct Target { const char* name; const char* wrapper; };
-static const Target TARGETS[] = {
-    {"battle.battlemanager",                      WRAP_BATTLEMANAGER},
-    {"battle.skill.base.object.attackresultdata", WRAP_ATTACKRESULT},
-    {"game.sdk.adsystem",                         WRAP_ADSYSTEM},
+// ── ElfImg ─────────────────────────────────────────────────────────────────
+struct ElfImg {
+    uintptr_t          base  = 0;
+    const ElfW(Phdr)*  phdr  = nullptr;
+    size_t             phnum = 0;
+    const char*        path  = nullptr;
+    bool has() const { return base && phdr && phnum; }
+    bool contains(uintptr_t a, size_t sz, unsigned fl = PF_R) const {
+        if (!a || !sz || !phdr) return false;
+        for (size_t i = 0; i < phnum; ++i) {
+            const ElfW(Phdr)& p = phdr[i];
+            if (p.p_type != PT_LOAD || (p.p_flags & fl) != fl) continue;
+            uintptr_t s = base + p.p_vaddr;
+            if (a >= s && (a - s) <= p.p_memsz - sz) return true;
+        }
+        return false;
+    }
+    bool ru32(uintptr_t a, uint32_t* v) const {
+        if (!contains(a, 4)) return false;
+        memcpy(v, (const void*)a, 4); return true;
+    }
+    uintptr_t da(ElfW(Addr) val, size_t sz) const {
+        if (!val) return 0;
+        if (contains((uintptr_t)val, sz)) return (uintptr_t)val;
+        uintptr_t a = base + val;
+        return contains(a, sz) ? a : 0;
+    }
 };
-static constexpr int N_TARGETS = (int)(sizeof(TARGETS)/sizeof(TARGETS[0]));
 
-// ═══════════════════════════════════════════════════════════
-//  luaL_loadbufferx hook
-// ═══════════════════════════════════════════════════════════
-static std::atomic<bool> g_globals_set{false};
-
-static int h_loadbufferx(lua_State* L, const char* buff, size_t sz,
-                          const char* name, const char* mode) {
-    T_COUNT(loadbufferx);
-    if (!name) return o_loadbufferx(L, buff, sz, name, mode);
-
-    int ti = -1;
-    for (int i = 0; i < N_TARGETS; ++i)
-        if (strcmp(name, TARGETS[i].name) == 0) { ti = i; break; }
-    if (ti < 0) return o_loadbufferx(L, buff, sz, name, mode);
-
-    LOGI("[HTHK] intercept '%s' sz=%zu", name, sz);
-
-    {
-        std::lock_guard<std::mutex> lk(g_buf_mu);
-        g_orig_buf[name] = std::vector<char>(buff, buff + sz);
+// ── ElfExports ─────────────────────────────────────────────────────────────
+class ElfExports {
+    const ElfImg& img_;
+    uintptr_t sym_=0, str_=0, sysv_=0, gnu_=0;
+    size_t strsz_=0;
+    void* symAt(uint32_t idx, const char* name) const {
+        uintptr_t a = sym_ + idx * sizeof(ElfW(Sym));
+        if (!img_.contains(a, sizeof(ElfW(Sym)))) return nullptr;
+        ElfW(Sym) s; memcpy(&s, (const void*)a, sizeof(s));
+        if (s.st_shndx == SHN_UNDEF || s.st_name >= strsz_) return nullptr;
+        unsigned t = s.st_info & 0xf, b = s.st_info >> 4;
+        if ((t != STT_FUNC && t != STT_NOTYPE) || (b != STB_GLOBAL && b != STB_WEAK)) return nullptr;
+        size_t nl = strlen(name) + 1;
+        if (nl > strsz_ - s.st_name) return nullptr;
+        if (memcmp((const void*)(str_ + s.st_name), name, nl)) return nullptr;
+        uintptr_t fn = (s.st_shndx == SHN_ABS) ? s.st_value : img_.base + s.st_value;
+        return img_.contains(fn, 1, PF_X) ? (void*)fn : nullptr;
     }
-
-    bool expected = false;
-    if (g_globals_set.compare_exchange_strong(expected, true)) {
-        if (f_pushcclosure && f_setglobal) {
-            f_pushcclosure(L, c_orig_load, 0);
-            f_setglobal(L, "__hthk_orig_load");
-            f_pushcclosure(L, c_hthk_num, 0);
-            f_setglobal(L, "__hthk_num");
-            LOGI("[HTHK] Lua globals registered");
+public:
+    explicit ElfExports(const ElfImg& img) : img_(img) {}
+    bool init() {
+        uintptr_t dyn = 0; size_t cnt = 0;
+        for (size_t i = 0; i < img_.phnum; ++i) {
+            const ElfW(Phdr)& p = img_.phdr[i];
+            if (p.p_type == PT_DYNAMIC) { dyn = img_.base + p.p_vaddr; cnt = p.p_memsz / sizeof(ElfW(Dyn)); break; }
         }
-    }
-
-    const char* src = TARGETS[ti].wrapper;
-    int rc = o_loadbufferx(L, src, strlen(src), name, "t");
-    if (rc != 0) {
-        LOGE("[HTHK] wrapper FAIL '%s' rc=%d - fallback", name, rc);
-        if (f_settop) f_settop(L, 0);
-        return o_loadbufferx(L, buff, sz, name, mode);
-    }
-    LOGI("[HTHK] wrapper OK '%s'", name);
-    return 0;
-}
-
-// ═══════════════════════════════════════════════════════════
-//  LGL menu
-// ═══════════════════════════════════════════════════════════
-extern "C" JNIEXPORT jstring JNICALL
-Java_com_android_support_Main_GetFeatureList(JNIEnv* env, jclass) {
-    return env->NewStringUTF(
-        "Category_" GAME_NAME "\n"
-        "0_SeekBar_Sát thương ×2/5/20_0_3\n"
-        "1_SeekBar_Tốc độ ×3/5/10_0_3\n"
-        "2_Toggle_Bỏ quảng cáo"
-    );
-}
-
-extern "C" JNIEXPORT void JNICALL
-Java_com_android_support_Main_Changes(JNIEnv*, jclass, jobject,
-        jint featNum, jstring, jfloat value, jboolean boolean, jstring) {
-    switch (featNum) {
-        case 0: {
-            int lv = (int)roundf(value);
-            if (lv < 0) lv = 0; else if (lv > 3) lv = 3;
-            g_dmg.store(lv, std::memory_order_relaxed);
-            const int mults[] = {1, 2, 5, 20};
-            LOGI("[HTHK] Sát thương ×%d", mults[lv]);
-            break;
+        if (!cnt || cnt > 65536 || !img_.contains(dyn, cnt * sizeof(ElfW(Dyn)))) return false;
+        const ElfW(Dyn)* d = (const ElfW(Dyn)*)dyn;
+        ElfW(Addr) sym=0, str=0, sysv=0, gnu=0; size_t stride = sizeof(ElfW(Sym));
+        for (size_t i = 0; i < cnt; ++i) {
+            if (d[i].d_tag == DT_NULL) break;
+            switch (d[i].d_tag) {
+                case DT_SYMTAB: sym=d[i].d_un.d_ptr; break;
+                case DT_STRTAB: str=d[i].d_un.d_ptr; break;
+                case DT_STRSZ:  strsz_=d[i].d_un.d_val; break;
+                case DT_SYMENT: stride=d[i].d_un.d_val; break;
+                case DT_HASH:   sysv=d[i].d_un.d_ptr; break;
+                case DT_GNU_HASH: gnu=d[i].d_un.d_ptr; break;
+            }
         }
-        case 1: {
-            int lv = (int)roundf(value);
-            if (lv < 0) lv = 0; else if (lv > 3) lv = 3;
-            g_spd.store(lv, std::memory_order_relaxed);
-            const int mults[] = {1, 3, 5, 10};
-            LOGI("[HTHK] Tốc độ ×%d", mults[lv]);
-            break;
-        }
-        case 2: {
-            bool v = boolean == JNI_TRUE;
-            g_ads.store(v, std::memory_order_relaxed);
-            LOGI("[HTHK] Bỏ quảng cáo: %s", v ? "ON" : "OFF");
-            break;
-        }
+        if (stride != sizeof(ElfW(Sym)) || !strsz_) return false;
+        sym_ = img_.da(sym, sizeof(ElfW(Sym)));
+        str_ = img_.da(str, strsz_);
+        sysv_ = img_.da(sysv, 8);
+        gnu_  = img_.da(gnu,  16);
+        return sym_ && str_ && (gnu_ || sysv_);
     }
-}
-
-// ═══════════════════════════════════════════════════════════
-//  Mục 9 — Khởi tạo (chờ libtolua.so rồi hook)
-// ═══════════════════════════════════════════════════════════
-static void* mod_thread(void*) {
-    T_STEP("start mod_thread");
-    LOGI("[HTHK] mod_thread started");
-
-    // Chờ libtolua.so load (tối đa 30 s)
-    T_STEP("wait libtolua");
-    for (int i = 0; i < 300; ++i) {
-        if (FindTolua()) break;
-        usleep(100000);
-    }
-    if (!g_tolua.base) {
-        LOGE("[HTHK] libtolua.so NOT FOUND — abort");
+    void* find(const char* name) const {
+        if (!name || !sym_ || !str_) return nullptr;
+        if (gnu_) {
+            uint32_t bc=0, fs=0, bl=0;
+            img_.ru32(gnu_, &bc); img_.ru32(gnu_+4, &fs); img_.ru32(gnu_+8, &bl);
+            uintptr_t buckets = gnu_ + 16 + bl * sizeof(ElfW(Addr));
+            uintptr_t chains  = buckets + bc * 4;
+            if (bc && bl) {
+                uint32_t h=5381, idx=0;
+                for (const unsigned char* p=(const unsigned char*)name; *p; ++p) h=h*33+*p;
+                if (img_.ru32(buckets + (h % bc) * 4, &idx) && idx >= fs) {
+                    for (size_t step=0; step<1048576; ++step, ++idx) {
+                        uint32_t c=0;
+                        if (!img_.ru32(chains + (idx-fs)*4, &c)) break;
+                        if ((c|1u)==(h|1u)) { void* fn=symAt(idx,name); if(fn) return fn; }
+                        if (c&1u) break;
+                    }
+                }
+            }
+        }
+        if (sysv_) {
+            uint32_t bc=0, sc=0;
+            img_.ru32(sysv_, &bc); img_.ru32(sysv_+4, &sc);
+            uintptr_t buckets = sysv_+8, chains = buckets + bc*4;
+            if (bc && sc) {
+                uint32_t h=0, idx=0;
+                for (const unsigned char* p=(const unsigned char*)name; *p; ++p) {
+                    h=(h<<4)+*p; uint32_t hi=h&0xf0000000u; if(hi){h^=hi>>24;} h&=~hi;
+                }
+                if (img_.ru32(buckets + (h%bc)*4, &idx)) {
+                    for (size_t step=0; idx && idx<sc && step<1048576; ++step) {
+                        void* fn=symAt(idx,name); if(fn) return fn;
+                        if (!img_.ru32(chains+idx*4, &idx)) break;
+                    }
+                }
+            }
+        }
         return nullptr;
     }
-    LOGI("[HTHK] libtolua base=%p path=%s",
-         (void*)g_tolua.base, g_tolua.path ? g_tolua.path : "?");
+};
 
-    // Resolve Lua API
-    T_STEP("resolve Lua API");
-    void* handle = (g_tolua.path && *g_tolua.path)
-                   ? dlopen(g_tolua.path, RTLD_NOW | RTLD_NOLOAD) : nullptr;
-    ToluaExports exp;
-    bool has_exp = exp.Init();
-    LOGI("[HTHK] ELF resolver init=%d", has_exp ? 1 : 0);
+// ── FindLib ────────────────────────────────────────────────────────────────
+static bool FindLib(ElfImg& img, const char* libname) {
+    struct Ctx { ElfImg* img; const char* name; bool found; };
+    Ctx ctx{&img, libname, false};
+    dl_iterate_phdr([](struct dl_phdr_info* info, size_t, void* data) -> int {
+        Ctx* c = (Ctx*)data;
+        const char* path = info->dlpi_name;
+        if (!path || !info->dlpi_phdr || !info->dlpi_phnum) return 0;
+        const char* leaf = strrchr(path, '/'); leaf = leaf ? leaf+1 : path;
+        if (strcmp(leaf, c->name) != 0) return 0;
+        c->img->base  = info->dlpi_addr;
+        c->img->phdr  = info->dlpi_phdr;
+        c->img->phnum = info->dlpi_phnum;
+        c->img->path  = path;
+        c->found = true;
+        return 1;
+    }, &ctx);
+    return ctx.found;
+}
 
-    auto res = [&](const char* sym) -> void* {
-        void* fn = handle ? dlsym(handle, sym) : nullptr;
-        if (fn && TC((uintptr_t)fn, 1, PF_X)) return fn;
-        return has_exp ? exp.Find(sym) : nullptr;
+// ── IL2CPP API ─────────────────────────────────────────────────────────────
+static void*   (*i_domain_get)()                                    = nullptr;
+static void*   (*i_thread_attach)(void*)                            = nullptr;
+static void**  (*i_domain_assemblies)(void*, size_t*)               = nullptr;
+static void*   (*i_asm_image)(void*)                                = nullptr;
+static void*   (*i_class_from_name)(void*, const char*, const char*)= nullptr;
+static void*   (*i_class_get_method)(void*, const char*, int)       = nullptr;
+
+static bool InitIL2CppAPI(const ElfImg& img) {
+    ElfExports ex(img); if (!ex.init()) { LOGE("il2cpp ElfExports init FAIL"); return false; }
+    void* h = img.path ? dlopen(img.path, RTLD_NOW|RTLD_NOLOAD) : nullptr;
+    auto res = [&](const char* n) -> void* {
+        void* fn = h ? dlsym(h, n) : nullptr;
+        if (fn && img.contains((uintptr_t)fn, 1, PF_X)) return fn;
+        return ex.find(n);
     };
+    i_domain_get       = (decltype(i_domain_get))      res("il2cpp_domain_get");
+    i_thread_attach    = (decltype(i_thread_attach))   res("il2cpp_thread_attach");
+    i_domain_assemblies= (decltype(i_domain_assemblies))res("il2cpp_domain_get_assemblies");
+    i_asm_image        = (decltype(i_asm_image))       res("il2cpp_assembly_get_image");
+    i_class_from_name  = (decltype(i_class_from_name)) res("il2cpp_class_from_name");
+    i_class_get_method = (decltype(i_class_get_method))res("il2cpp_class_get_method_from_name");
+    bool ok = i_domain_get && i_thread_attach && i_domain_assemblies &&
+              i_asm_image && i_class_from_name && i_class_get_method;
+    LOGI("IL2CPP API: %s", ok ? "OK" : "FAIL");
+    return ok;
+}
 
-    f_settop       = (decltype(f_settop))       res("lua_settop");
-    f_pushnumber   = (decltype(f_pushnumber))   res("lua_pushnumber");
-    f_pushcclosure = (decltype(f_pushcclosure)) res("lua_pushcclosure");
-    f_setglobal    = (decltype(f_setglobal))    res("lua_setglobal");
-    f_tonumberx    = (decltype(f_tonumberx))    res("lua_tonumberx");
-    f_tolstring    = (decltype(f_tolstring))    res("lua_tolstring");
-    void* lbx = res("luaL_loadbufferx");
-
-    LOGI("[HTHK] settop=%p push=%p closure=%p setg=%p tonum=%p tostr=%p lbx=%p",
-         (void*)f_settop, (void*)f_pushnumber, (void*)f_pushcclosure,
-         (void*)f_setglobal, (void*)f_tonumberx, (void*)f_tolstring, lbx);
-
-    if (!lbx || !f_pushcclosure || !f_setglobal || !f_tonumberx || !f_tolstring) {
-        LOGE("[HTHK] Lua API missing — abort");
-        return nullptr;
+static void* FindIL2CppClass(const char* ns, const char* cls) {
+    void* domain = i_domain_get(); if (!domain) return nullptr;
+    size_t n = 0;
+    void** asms = i_domain_assemblies(domain, &n);
+    for (size_t i = 0; i < n; ++i) {
+        void* img = i_asm_image(asms[i]); if (!img) continue;
+        void* k = i_class_from_name(img, ns, cls);
+        if (k) return k;
     }
+    return nullptr;
+}
 
-    // Hook luaL_loadbufferx
-    T_STEP("DobbyHook luaL_loadbufferx");
-    int rc = DobbyHook(lbx, (void*)h_loadbufferx, (void**)&o_loadbufferx);
-    if (rc != 0 || !o_loadbufferx) {
-        LOGE("[HTHK] DobbyHook FAIL rc=%d", rc);
-        return nullptr;
+// ── Speed hooks (Time.set/get_timeScale) ───────────────────────────────────
+typedef void  (*t_set_ts)(float, void*);
+typedef float (*t_get_ts)(void*);
+static t_set_ts o_set_ts = nullptr;
+static t_get_ts o_get_ts = nullptr;
+
+static void h_set_ts(float v, void* mi) {
+    T_COUNT(set_ts);
+    g_ts_game.store(v, std::memory_order_relaxed);
+    int s = g_spd.load(std::memory_order_relaxed);
+    float mul = (s >= 0 && s < 4) ? SPD_MUL[s] : 1.0f;
+    if (o_set_ts) o_set_ts(v * mul, mi);
+}
+static float h_get_ts(void* mi) {
+    T_COUNT(get_ts);
+    return g_ts_game.load(std::memory_order_relaxed);
+}
+
+// ── libtolua hook ──────────────────────────────────────────────────────────
+typedef int (*t_lua_load)(void* L, const char* buf, size_t sz,
+                          const char* chunkname, const char* mode);
+static t_lua_load o_lua_load = nullptr;
+// sync forward pointer after hook
+static inline void sync_fwd() { o_lua_load_fwd = (t_lua_load2)o_lua_load; }
+
+// ── Lua wrappers ───────────────────────────────────────────────────────────
+#define LUA_WRAP_DAMAGE \
+"local NAME='@battle/skill/base/object/attackResultData.lua'\n" \
+"local chunk=assert(__hthk_orig_load(NAME),'hthk:nil '..NAME)\n" \
+"local ARD=chunk(...)\n" \
+"if type(ARD)~='table' or type(ARD.GetHurtVal)~='function' then return ARD end\n" \
+"local _g=ARD.GetHurtVal\n" \
+"local function team_of(p)\n" \
+"  if type(p)~='table' or type(p.GetTeamId)~='function' then return nil end\n" \
+"  local ok,t=pcall(function() return p:GetTeamId() end)\n" \
+"  if not ok then return nil end\n" \
+"  return t\n" \
+"end\n" \
+"local _said=0\n" \
+"function ARD:GetHurtVal()\n" \
+"  local v=_g(self)\n" \
+"  local m=math.floor(__hthk_num(0))\n" \
+"  if m<=1 or type(v)~='number' or v<=0 then return v end\n" \
+"  local atk,def\n" \
+"  pcall(function() atk=team_of(self:GetMaster()) end)\n" \
+"  pcall(function() def=team_of(self:GetTarget()) end)\n" \
+"  if atk~=1 or def==nil or def==1 then return v end\n" \
+"  if _said<3 then _said=_said+1\n" \
+"    __hthk_log('dmg '..tostring(v)..'->'..tostring(v*m)..' (atk='..tostring(atk)..',def='..tostring(def)..')')\n" \
+"  end\n" \
+"  return v*m\n" \
+"end\n" \
+"return ARD\n"
+
+#define LUA_WRAP_ADS \
+"local NAME='@game/sdk/adSystem.lua'\n" \
+"local chunk=assert(__hthk_orig_load(NAME),'hthk:nil '..NAME)\n" \
+"local M=chunk(...)\n" \
+"if type(M)~='table' then return M end\n" \
+"local _show=M.ShowRewardAd\n" \
+"if type(_show)=='function' then\n" \
+"  function M:ShowRewardAd(id,cb,...)\n" \
+"    if __hthk_num(2)>=1 then\n" \
+"      if type(cb)=='function' then cb(true) end\n" \
+"      return\n" \
+"    end\n" \
+"    return _show(self,id,cb,...)\n" \
+"  end\n" \
+"end\n" \
+"return M\n"
+
+// ── luaL_loadbufferx hook ──────────────────────────────────────────────────
+static int h_lua_load(void* L, const char* buf, size_t sz,
+                      const char* chunkname, const char* mode) {
+    T_COUNT(lua_load);
+    if (chunkname) {
+        const char* wrapper = nullptr;
+        if (strcmp(chunkname, "@battle/skill/base/object/attackResultData.lua") == 0)
+            wrapper = LUA_WRAP_DAMAGE;
+        else if (strcmp(chunkname, "@game/sdk/adSystem.lua") == 0)
+            wrapper = LUA_WRAP_ADS;
+        if (wrapper) {
+            LOGI("intercept '%s'", chunkname);
+            {
+                std::lock_guard<std::mutex> lock(g_buf_mtx);
+                std::string key(chunkname);
+                if (g_orig_bufs.find(key) == g_orig_bufs.end())
+                    g_orig_bufs[key] = std::vector<char>(buf, buf + sz);
+            }
+            lua_reg_helpers(L);
+            return o_lua_load(L, wrapper, strlen(wrapper), chunkname, "t");
+        }
     }
-    LOGI("[HTHK] Hook luaL_loadbufferx OK");
+    return o_lua_load(L, buf, sz, chunkname, mode);
+}
 
+// ── ResolveAll ─────────────────────────────────────────────────────────────
+static void ResolveAll() {
+    T_STEP("ResolveAll");
+    // Phase 1: libtolua
+    ElfImg tolua;
+    if (!FindLib(tolua, "libtolua.so")) { LOGE("libtolua.so NOT FOUND"); }
+    else {
+        ElfExports ex(tolua); ex.init();
+        void* fn = ex.find("luaL_loadbufferx");
+        if (!fn) { LOGE("luaL_loadbufferx NOT FOUND"); }
+        else {
+            if (DobbyHook(fn, (void*)h_lua_load, (void**)&o_lua_load) == 0 && o_lua_load) {
+                sync_fwd();
+                LOGI("Hook luaL_loadbufferx OK");
+            } else {
+                LOGE("Hook luaL_loadbufferx FAIL");
+            }
+        }
+        // Lua API
+        void* lh = tolua.path ? dlopen(tolua.path, RTLD_NOW|RTLD_NOLOAD) : nullptr;
+        auto lr = [&](const char* n) -> void* {
+            void* f = lh ? dlsym(lh, n) : nullptr;
+            if (f && tolua.contains((uintptr_t)f, 1, PF_X)) return f;
+            return ex.find(n);
+        };
+        l_pushcclosure = (decltype(l_pushcclosure))lr("lua_pushcclosure");
+        l_setglobal    = (decltype(l_setglobal))   lr("lua_setglobal");
+        l_setfield     = (decltype(l_setfield))    lr("lua_setfield");
+        l_pushnumber   = (decltype(l_pushnumber))  lr("lua_pushnumber");
+        l_tonumber     = (decltype(l_tonumber))    lr("lua_tonumber");
+        l_tolstring    = (decltype(l_tolstring))   lr("lua_tolstring");
+        l_settop       = (decltype(l_settop))      lr("lua_settop");
+        l_gettop       = (decltype(l_gettop))      lr("lua_gettop");
+        LOGI("Lua API: cc=%p sg=%p sf=%p pn=%p tn=%p ts=%p st=%p gt=%p",
+             l_pushcclosure, l_setglobal, l_setfield, l_pushnumber, l_tonumber, l_tolstring,
+             l_settop, l_gettop);
+    }
+    TraceReport();
     isGameReady = true;
-    T_STEP("MOD READY");
-    LOGI("[HTHK] MOD READY");
     TraceStartCallReports();
+    LOGI("MOD READY");
+}
 
+// ── Phase 2: IL2CPP speed hooks ────────────────────────────────────────────
+static void SetupSpeedHooks() {
+    T_STEP("SetupSpeedHooks");
+    ElfImg il2cpp;
+    for (int retry = 0; retry < 60; ++retry) {
+        if (FindLib(il2cpp, "libil2cpp.so") && il2cpp.has()) break;
+        TraceSleep(1);
+    }
+    if (!il2cpp.has()) { LOGE("libil2cpp.so NOT FOUND"); return; }
+    LOGI("libil2cpp base=%p", (void*)il2cpp.base);
+
+    if (!InitIL2CppAPI(il2cpp)) return;
+
+    // Wait for il2cpp domain
+    void* domain = nullptr;
+    void* thread = nullptr;
+    for (int retry = 0; retry < 60; ++retry) {
+        domain = i_domain_get();
+        if (domain) break;
+        TraceSleep(1);
+    }
+    if (!domain) { LOGE("il2cpp domain NOT READY"); return; }
+
+    thread = i_thread_attach(domain);
+    TraceSleep(2); // let assemblies stabilize
+
+    // Find UnityEngine.Time
+    void* klass = FindIL2CppClass("UnityEngine", "Time");
+    if (!klass) { LOGE("UnityEngine.Time NOT FOUND"); return; }
+    LOGI("Time class: %p", klass);
+
+    // set_timeScale(1 param)
+    void* m_set = i_class_get_method(klass, "set_timeScale", 1);
+    if (m_set) {
+        void* fn = *(void**)m_set;
+        if (DobbyHook(fn, (void*)h_set_ts, (void**)&o_set_ts) == 0 && o_set_ts)
+            LOGI("Hook set_timeScale OK");
+        else LOGE("Hook set_timeScale FAIL");
+    } else LOGE("set_timeScale(1) NOT FOUND");
+
+    // get_timeScale(0 params)
+    void* m_get = i_class_get_method(klass, "get_timeScale", 0);
+    if (m_get) {
+        void* fn = *(void**)m_get;
+        if (DobbyHook(fn, (void*)h_get_ts, (void**)&o_get_ts) == 0 && o_get_ts)
+            LOGI("Hook get_timeScale OK");
+        else LOGE("Hook get_timeScale FAIL");
+    } else LOGE("get_timeScale(0) NOT FOUND");
+}
+
+// ── mod_thread ─────────────────────────────────────────────────────────────
+static void* mod_thread(void*) {
+    T_STEP("wait libtolua");
+    ElfImg tolua;
+    for (int retry = 0; retry < 120; ++retry) {
+        if (FindLib(tolua, "libtolua.so") && tolua.has()) break;
+        TraceSleep(1);
+    }
+    if (!tolua.has()) { LOGE("libtolua.so NEVER LOADED"); return nullptr; }
+    TraceSleep(1);
+    ResolveAll();
+    SetupSpeedHooks();
     return nullptr;
 }
 
 __attribute__((constructor))
 static void on_load() {
-    pthread_t t;
-    pthread_create(&t, nullptr, mod_thread, nullptr);
-    pthread_detach(t);
+    T_STEP("on_load");
+    pthread_t t; pthread_create(&t, nullptr, mod_thread, nullptr);
 }
 
-extern "C" JNIEXPORT void JNICALL
-Java_com_android_support_Main_CheckOverlayPermission(JNIEnv*, jclass, jobject) {}
+// ── JNI stubs required by JNI_Boilerplate.h ───────────────────────────────
+static jstring IconWebViewData(JNIEnv* env, jclass)  { return env->NewStringUTF(""); }
+static jstring GetMenuTitle(JNIEnv* env, jclass)     { return env->NewStringUTF(GAME_NAME); }
+static jstring GetMenuSubtitle(JNIEnv* env, jclass)  { return env->NewStringUTF("LGL Mod"); }
+static jstring GetTeleLink(JNIEnv* env, jclass)      { return env->NewStringUTF(""); }
+static jstring GetTeleText(JNIEnv* env, jclass)      { return env->NewStringUTF(""); }
+static jstring GetWebLink(JNIEnv* env, jclass)       { return env->NewStringUTF(""); }
+static jstring GetWebText(JNIEnv* env, jclass)       { return env->NewStringUTF(""); }
+static jstring GetZaloLink(JNIEnv* env, jclass)      { return env->NewStringUTF(""); }
+static jstring GetZaloText(JNIEnv* env, jclass)      { return env->NewStringUTF(""); }
+static jboolean VerifyKeyNative(JNIEnv*, jclass, jstring) { return JNI_TRUE; }
+static void Init(JNIEnv*, jclass, jobject, jobject, jobject) {}
+static jobjectArray SettingsList(JNIEnv* env, jclass) {
+    return env->NewObjectArray(0, env->FindClass("java/lang/String"), nullptr);
+}
+
+static jobjectArray GetFeatureList(JNIEnv* env, jclass) {
+    const char* items[] = {
+        "0_SeekBar_Sat thuong_1_99999",
+        "1_SeekBar_Toc do_0_3",
+        "2_Toggle_Bo quang cao"
+    };
+    int n = 3;
+    jclass sc = env->FindClass("java/lang/String");
+    jobjectArray arr = env->NewObjectArray(n, sc, nullptr);
+    for (int i = 0; i < n; ++i)
+        env->SetObjectArrayElement(arr, i, env->NewStringUTF(items[i]));
+    return arr;
+}
+
+static void Changes(JNIEnv*, jclass, jobject,
+    jint featNum, jstring, jint value, jboolean enabled, jstring) {
+    switch (featNum) {
+        case 0: {
+            int lv = (int)value;
+            if (lv < 1) lv = 1; if (lv > 99999) lv = 99999;
+            g_dmg.store(lv, std::memory_order_relaxed);
+            LOGI("Damage x%d", lv);
+            break;
+        }
+        case 1: {
+            int lv = (int)value;
+            if (lv < 0) lv = 0; if (lv > 3) lv = 3;
+            g_spd.store(lv, std::memory_order_relaxed);
+            float cur = g_ts_game.load(std::memory_order_relaxed);
+            if (o_set_ts) o_set_ts(cur * SPD_MUL[lv], nullptr);
+            LOGI("Speed x%d (mul=%.0f)", lv, SPD_MUL[lv]);
+            break;
+        }
+        case 2:
+            g_ads.store(enabled == JNI_TRUE, std::memory_order_relaxed);
+            LOGI("Ads skip: %d", (int)(enabled == JNI_TRUE));
+            break;
+    }
+}
+
+static void CheckOverlayPermission(JNIEnv*, jclass, jobject) {}
+
+extern "C" JNIEXPORT jstring JNICALL Java_com_android_support_Menu_getMenuTitle(JNIEnv* env, jclass) {
+    return env->NewStringUTF("Hai Tac Truyen Ky");
+}
 
 #include "Includes/JNI_Boilerplate.h"
