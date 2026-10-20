@@ -20,12 +20,6 @@
       "index": 2,
       "name": "Bỏ quảng cáo",
       "name_en": "Skip Ads"
-    },
-    {
-      "type": "toggle",
-      "index": 3,
-      "name": "Bất tử",
-      "name_en": "God Mode"
     }
   ]
 }
