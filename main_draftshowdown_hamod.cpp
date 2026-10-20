@@ -363,8 +363,8 @@ float h_get_timeScale(void* mi) {
 //  LGL cần user bấm hủy (billing dialog → huỷ → HandlePurchaseFailure với productInfo non-null).
 //
 //  Giải pháp HAMOD:
-//  1. Hook IAPMediator.BuyIAPProduct → lưu (self_iap, productId=bundle+0x18, storeId)
-//     dump.cs: Bundle.ProductId (String) @ 0x18 (sau _serializerSettings @ 0x10)
+//  1. Hook IAPMediator.BuyIAPProduct → lưu (self_iap, productId=bundle+g_bundle_productId_offset, storeId)
+//     Offset được resolve động tại runtime qua il2cpp_field_get_offset("ProductId") — dump.cs không đáng tin
 //  2. Hook ListenerHandler.OnPurchaseFailure:
 //     - Nếu productInfo=null → gọi IAPMediator.GetProductWithId(savedProductId, savedStoreId)
 //     - Sau đó gọi ListenerHandler.OnPurchaseComplete → dispatch chain → cấp hàng + tắt spinner
@@ -385,6 +385,8 @@ float h_get_timeScale(void* mi) {
 static void*   g_saved_iap_self  = nullptr;
 static void*   g_saved_productId = nullptr;
 static int32_t g_saved_storeId   = 0;
+// Offset của Bundle.ProductId — resolve động tại runtime (dump.cs có thể sai)
+static int32_t g_bundle_productId_offset = -1;
 
 // IAPMediator.GetProductWithId(self, productId, storeId, mi) → ProductReceivedInfo
 static void* (*g_IAP_GetProductWithId)(void*, void*, int32_t, void*) = nullptr;
@@ -399,16 +401,21 @@ void (*o_BuyIAPProduct)(void*, void*, void*, int32_t, void*) = nullptr;
 void h_BuyIAPProduct(void* self, void* bundle, void* validator,
                      int32_t storeId, void* mi) {
     if (g_feature0.load(std::memory_order_acquire) && bundle) {
-        // Bundle.ProductId is at offset 0x18 (confirmed from dump.cs).
-        // offset 0x10 is _serializerSettings (JSON object, always non-null) — do NOT read it.
-        void* pid = *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(bundle) + 0x18);
-        if (pid) {
-            g_saved_iap_self  = self;
-            g_saved_productId = pid;
-            g_saved_storeId   = storeId;
-            LOGI("[FreeShop] context saved iap=%p storeId=%d pid=%p", self, storeId, pid);
+        if (g_bundle_productId_offset >= 0) {
+            void* pid = *reinterpret_cast<void**>(
+                reinterpret_cast<uintptr_t>(bundle) + (uint32_t)g_bundle_productId_offset);
+            if (pid) {
+                g_saved_iap_self  = self;
+                g_saved_productId = pid;
+                g_saved_storeId   = storeId;
+                LOGI("[FreeShop] context saved iap=%p storeId=%d pid=%p offset=+0x%X",
+                     self, storeId, pid, (uint32_t)g_bundle_productId_offset);
+            } else {
+                LOGE("[FreeShop] BuyIAPProduct: bundle=%p ProductId null at +0x%X",
+                     bundle, (uint32_t)g_bundle_productId_offset);
+            }
         } else {
-            LOGE("[FreeShop] BuyIAPProduct: bundle=%p but ProductId null at +0x18", bundle);
+            LOGE("[FreeShop] BuyIAPProduct: Bundle.ProductId offset not resolved yet");
         }
     }
     if (o_BuyIAPProduct) o_BuyIAPProduct(self, bundle, validator, storeId, mi);
@@ -532,6 +539,28 @@ void* h_t(void*) {
                                                          OBFUSCATE("ListenerHandler"));
             if (!klass) continue;
             found_lh = true;
+
+            // Bundle (cùng assembly với ListenerHandler) — lấy offset ProductId động
+            {
+                void* kBundle = il2cpp_class_from_name(img, OBFUSCATE("Voodoo.Sauce.IAP"),
+                                                        OBFUSCATE("Bundle"));
+                if (!kBundle) kBundle = il2cpp_class_from_name(img, OBFUSCATE("Voodoo.IAP"),
+                                                                OBFUSCATE("Bundle"));
+                if (!kBundle) kBundle = il2cpp_class_from_name(img, OBFUSCATE(""),
+                                                                OBFUSCATE("Bundle"));
+                if (kBundle && il2cpp_class_get_field_from_name && il2cpp_field_get_offset) {
+                    void* fPid = il2cpp_class_get_field_from_name(kBundle, OBFUSCATE("ProductId"));
+                    if (fPid) {
+                        g_bundle_productId_offset = il2cpp_field_get_offset(fPid);
+                        LOGI("[FreeShop] Bundle.ProductId offset = +0x%X",
+                             (uint32_t)g_bundle_productId_offset);
+                    } else {
+                        LOGE("[FreeShop] Bundle.ProductId field NOT FOUND");
+                    }
+                } else {
+                    LOGE("[FreeShop] Bundle class NOT FOUND in this assembly");
+                }
+            }
 
             void* mOPC = il2cpp_class_get_method_from_name(klass,
                              OBFUSCATE("OnPurchaseComplete"), 2);
