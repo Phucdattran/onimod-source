@@ -357,41 +357,80 @@ float h_get_timeScale(void* mi) {
 // ═══════════════════════════════════════════════════════════
 //  FREE SHOP
 //
-//  HAMOD không có Google Play → VoodooSauce không tìm được payment provider
-//  → gọi ListenerHandler.OnPurchaseFailure cho mọi lần mua.
+//  HAMOD không có Google Play → VoodooSauce gọi OnPurchaseFailure với productInfo=null.
+//  LGL cần user bấm hủy (billing dialog xuất hiện, huỷ → productInfo non-null).
 //
-//  Giải pháp: Hook ListenerHandler.OnPurchaseFailure.
-//  Khi Free Shop ON → gọi ListenerHandler.OnPurchaseComplete(self, productInfo, storeId)
-//  thay vì để failure đi qua. Toàn bộ dispatch chain VoodooSauce chạy:
-//    ListenerHandler.OnPurchaseComplete(productInfo, storeId)
-//    → PurchaseHandler.OnPurchaseComplete(productInfo)
-//    → PurchaseManager.OnPurchaseComplete(productId, false)  [cấp hàng]
-//    → spinner tắt
+//  Giải pháp 2 hook:
+//  1. Hook IAPMediator.BuyIAPProduct → lưu (self, productId, storeId)
+//  2. Hook ListenerHandler.OnPurchaseFailure:
+//     - Nếu productInfo=null → gọi IAPMediator.GetProductWithId(savedProductId, savedStoreId)
+//       để tái tạo productInfo
+//     - Sau đó gọi ListenerHandler.OnPurchaseComplete → toàn bộ dispatch chain chạy
+//       → cấp hàng + tắt spinner
 //
 //  dump.cs:
-//    class ListenerHandler {                               // Voodoo.IAP.dll
-//        void OnPurchaseComplete(ProductReceivedInfo, StoreIdentifier);  // 0xB3CE6B8
-//        void OnPurchaseFailure(VoodooPurchaseFailureReason, ProductReceivedInfo,
-//                               String, StoreIdentifier);                // 0xB3CEC40
-//    }
+//    IAPMediator (VoodooSauce.dll, Voodoo.Sauce.IAP):
+//      GetProductWithId(String, StoreIdentifier)  // 0xB76CB58
+//      BuyIAPProduct(Bundle, IValidator, StoreIdentifier)  // 3 params
+//    ListenerHandler (Voodoo.IAP.dll, Voodoo.Sauce.IAP):
+//      OnPurchaseComplete(ProductReceivedInfo, StoreIdentifier)  // 0xB3CE6B8
+//      OnPurchaseFailure(reason, ProductReceivedInfo, String, StoreIdentifier)  // 0xB3CEC40
 // ═══════════════════════════════════════════════════════════
 
-// ListenerHandler.OnPurchaseComplete(self, ProductReceivedInfo, StoreIdentifier, mi)
+// Context lưu lại khi BuyIAPProduct được gọi
+static void*   g_saved_iap_self  = nullptr;
+static void*   g_saved_productId = nullptr;
+static int32_t g_saved_storeId   = 0;
+
+// IAPMediator.GetProductWithId(self, productId, storeId, mi) → ProductReceivedInfo
+static void* (*g_IAP_GetProductWithId)(void*, void*, int32_t, void*) = nullptr;
+static void* g_IAP_GetProductWithId_mi = nullptr;
+
+// ListenerHandler.OnPurchaseComplete(self, productInfo, storeId, mi)
 static void (*g_LH_OnPurchaseComplete)(void*, void*, int32_t, void*) = nullptr;
 static void* g_LH_OnPurchaseComplete_mi = nullptr;
 
-// Hook: ListenerHandler.OnPurchaseFailure(self, reason, productInfo, description, storeId, mi)
+// Hook 1: IAPMediator.BuyIAPProduct(self, bundle, validator, storeId, mi)
+void (*o_BuyIAPProduct)(void*, void*, void*, int32_t, void*) = nullptr;
+void h_BuyIAPProduct(void* self, void* bundle, void* validator,
+                     int32_t storeId, void* mi) {
+    if (g_feature0.load(std::memory_order_acquire) && bundle) {
+        // Bundle.ProductId — thử offset 0x10 (field đầu) rồi 0x18 (field thứ hai)
+        void* pid = *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(bundle) + 0x10);
+        if (!pid)
+            pid = *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(bundle) + 0x18);
+        if (pid) {
+            g_saved_iap_self  = self;
+            g_saved_productId = pid;
+            g_saved_storeId   = storeId;
+            LOGI("[FreeShop] context saved iap=%p storeId=%d", self, storeId);
+        } else {
+            LOGE("[FreeShop] BuyIAPProduct: bundle=%p but productId=null at 0x10/0x18", bundle);
+        }
+    }
+    if (o_BuyIAPProduct) o_BuyIAPProduct(self, bundle, validator, storeId, mi);
+}
+
+// Hook 2: ListenerHandler.OnPurchaseFailure(self, reason, productInfo, description, storeId, mi)
 void (*o_LH_OnPurchaseFailure)(void*, int32_t, void*, void*, int32_t, void*) = nullptr;
 void h_LH_OnPurchaseFailure(void* self, int32_t reason, void* productInfo,
                              void* description, int32_t storeId, void* mi) {
     if (g_feature0.load(std::memory_order_acquire)) {
-        if (g_LH_OnPurchaseComplete && productInfo) {
+        // HAMOD: không có GP → productInfo=null → tái tạo từ context đã lưu
+        if (!productInfo && g_saved_productId && g_IAP_GetProductWithId && g_saved_iap_self) {
+            productInfo = g_IAP_GetProductWithId(g_saved_iap_self, g_saved_productId,
+                                                  g_saved_storeId, g_IAP_GetProductWithId_mi);
+            LOGI("[FreeShop] rebuilt productInfo=%p (reason=%d)", productInfo, reason);
+        }
+        if (productInfo && g_LH_OnPurchaseComplete) {
             LOGI("[FreeShop] Failure(reason=%d) -> OnPurchaseComplete", reason);
             g_LH_OnPurchaseComplete(self, productInfo, storeId, g_LH_OnPurchaseComplete_mi);
+            g_saved_productId = nullptr;
             return;
         }
-        LOGE("[FreeShop] LH.OnPurchaseComplete=%p productInfo=%p — let fail",
-             (void*)g_LH_OnPurchaseComplete, productInfo);
+        LOGE("[FreeShop] fallback: productInfo=%p LH.OPC=%p savedPid=%p",
+             productInfo, (void*)g_LH_OnPurchaseComplete, g_saved_productId);
+        g_saved_productId = nullptr;
     }
     if (o_LH_OnPurchaseFailure)
         o_LH_OnPurchaseFailure(self, reason, productInfo, description, storeId, mi);
@@ -439,13 +478,45 @@ void* h_t(void*) {
     installed += DoHook((void*)addr_setTS, (void*)h_set_timeScale,
                         (void**)&o_set_timeScale, "Time.set_timeScale");
 
-    // Free Shop — hook ListenerHandler.OnPurchaseFailure → redirect to OnPurchaseComplete
-    // VoodooSauce gọi OnPurchaseFailure khi Google Play không có (HAMOD).
-    // Redirect → OnPurchaseComplete chạy toàn bộ dispatch chain: cấp hàng + tắt spinner.
+    // Free Shop — 2 hooks: BuyIAPProduct (save context) + OnPurchaseFailure (redirect to success)
     {
         size_t count = 0;
         void** assemblies = il2cpp_domain_get_assemblies(domain, &count);
 
+        // IAPMediator (VoodooSauce.dll) → GetProductWithId pointer + BuyIAPProduct hook
+        for (size_t i = 0; i < count; ++i) {
+            void* img = il2cpp_assembly_get_image(assemblies[i]);
+            if (!img) continue;
+            void* klass = il2cpp_class_from_name(img, OBFUSCATE("Voodoo.Sauce.IAP"),
+                                                  OBFUSCATE("IAPMediator"));
+            if (!klass) klass = il2cpp_class_from_name(img, OBFUSCATE(""),
+                                                         OBFUSCATE("IAPMediator"));
+            if (!klass) continue;
+
+            void* mGPWI = il2cpp_class_get_method_from_name(klass,
+                              OBFUSCATE("GetProductWithId"), 2);
+            if (mGPWI && *(void**)mGPWI) {
+                g_IAP_GetProductWithId    = (decltype(g_IAP_GetProductWithId))*(void**)mGPWI;
+                g_IAP_GetProductWithId_mi = mGPWI;
+                LOGI("[FreeShop] IAPMediator.GetProductWithId: %p",
+                     (void*)g_IAP_GetProductWithId);
+            } else {
+                LOGE("[FreeShop] IAPMediator.GetProductWithId(2) NOT FOUND");
+            }
+
+            void* mBuy = il2cpp_class_get_method_from_name(klass,
+                             OBFUSCATE("BuyIAPProduct"), 3);
+            if (mBuy && *(void**)mBuy) {
+                installed += DoHook(*(void**)mBuy, (void*)h_BuyIAPProduct,
+                                    (void**)&o_BuyIAPProduct,
+                                    "IAPMediator.BuyIAPProduct") ? 1 : 0;
+            } else {
+                LOGE("[FreeShop] IAPMediator.BuyIAPProduct(3) NOT FOUND");
+            }
+            break;
+        }
+
+        // ListenerHandler (Voodoo.IAP.dll) → OnPurchaseComplete pointer + OnPurchaseFailure hook
         bool found_lh = false;
         for (size_t i = 0; i < count && !found_lh; ++i) {
             void* img = il2cpp_assembly_get_image(assemblies[i]);
@@ -454,12 +525,11 @@ void* h_t(void*) {
                                                   OBFUSCATE("ListenerHandler"));
             if (!klass) klass = il2cpp_class_from_name(img, OBFUSCATE("Voodoo.Sauce.IAP"),
                                                          OBFUSCATE("ListenerHandler"));
-            if (!klass) klass = il2cpp_class_from_name(img, "",
+            if (!klass) klass = il2cpp_class_from_name(img, OBFUSCATE(""),
                                                          OBFUSCATE("ListenerHandler"));
             if (!klass) continue;
             found_lh = true;
 
-            // OnPurchaseComplete(ProductReceivedInfo, StoreIdentifier) — 2 params
             void* mOPC = il2cpp_class_get_method_from_name(klass,
                              OBFUSCATE("OnPurchaseComplete"), 2);
             if (mOPC && *(void**)mOPC) {
@@ -470,12 +540,10 @@ void* h_t(void*) {
                 LOGE("[FreeShop] LH.OnPurchaseComplete(2) NOT FOUND");
             }
 
-            // Hook OnPurchaseFailure(reason, productInfo, description, storeId) — 4 params
             void* mOPF = il2cpp_class_get_method_from_name(klass,
                              OBFUSCATE("OnPurchaseFailure"), 4);
             if (mOPF && *(void**)mOPF) {
-                uintptr_t addr = (uintptr_t)*(void**)mOPF;
-                installed += DoHook((void*)addr, (void*)h_LH_OnPurchaseFailure,
+                installed += DoHook(*(void**)mOPF, (void*)h_LH_OnPurchaseFailure,
                                     (void**)&o_LH_OnPurchaseFailure,
                                     "ListenerHandler.OnPurchaseFailure") ? 1 : 0;
             } else {
