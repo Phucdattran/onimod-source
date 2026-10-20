@@ -6,6 +6,7 @@
 
 #include <jni.h>
 bool isGameReady = false;
+static jboolean my_isGameLibLoaded(JNIEnv*,jobject){return isGameReady?JNI_TRUE:JNI_FALSE;}
 
 #include <pthread.h>
 #include <unistd.h>
@@ -295,11 +296,11 @@ static void ResolveAll() {
     T_STEP("ResolveAll");
 
     // Speed
-    T_HOOK("UnityEngine", "Time", "get_timeScale", 0, get_ts)
-    T_HOOK("UnityEngine", "Time", "set_timeScale", 1, set_ts)
+    T_HOOK("UnityEngine", "Time", "get_timeScale", 0, get_ts);
+    T_HOOK("UnityEngine", "Time", "set_timeScale", 1, set_ts);
 
     // Free Shop - IAPController
-    T_HOOK("TuoiTho", "IAPController", "BuyIAP", 1, BuyIAP)
+    T_HOOK("TuoiTho", "IAPController", "BuyIAP", 1, BuyIAP);
 
     // Cache GiveRewards (called from h_BuyIAP, not hooked)
     {
@@ -311,9 +312,9 @@ static void ResolveAll() {
     }
 
     // Free Shop - IAPModel
-    T_HOOK("TuoiTho", "IAPModel", "IsIAP", 2, IsIAP)
-    T_HOOK("TuoiTho", "IAPModel", "get_isBoughtAnyIAP", 0, isBoughtAnyIAP)
-    T_HOOK("TuoiTho", "IAPModel", "get_IsRemoveInterstitialAds", 0, IsRmAds)
+    T_HOOK("TuoiTho", "IAPModel", "IsIAP", 2, IsIAP);
+    T_HOOK("TuoiTho", "IAPModel", "get_isBoughtAnyIAP", 0, isBoughtAnyIAP);
+    T_HOOK("TuoiTho", "IAPModel", "get_IsRemoveInterstitialAds", 0, IsRmAds);
 
     TraceReport();
 }
