@@ -397,28 +397,32 @@ static void (*g_LH_OnPurchaseComplete)(void*, void*, int32_t, void*) = nullptr;
 static void* g_LH_OnPurchaseComplete_mi = nullptr;
 
 // Hook 1: IAPMediator.BuyIAPProduct(self, bundle, validator, storeId, mi)
-void (*o_BuyIAPProduct)(void*, void*, void*, int32_t, void*) = nullptr;
-void h_BuyIAPProduct(void* self, void* bundle, void* validator,
-                     int32_t storeId, void* mi) {
-    if (g_feature0.load(std::memory_order_acquire) && bundle) {
-        if (g_bundle_productId_offset >= 0) {
-            void* pid = *reinterpret_cast<void**>(
-                reinterpret_cast<uintptr_t>(bundle) + (uint32_t)g_bundle_productId_offset);
-            if (pid) {
-                g_saved_iap_self  = self;
-                g_saved_productId = pid;
-                g_saved_storeId   = storeId;
-                LOGI("[FreeShop] context saved iap=%p storeId=%d pid=%p offset=+0x%X",
-                     self, storeId, pid, (uint32_t)g_bundle_productId_offset);
-            } else {
-                LOGE("[FreeShop] BuyIAPProduct: bundle=%p ProductId null at +0x%X",
-                     bundle, (uint32_t)g_bundle_productId_offset);
-            }
+// Bundle là VALUE TYPE (struct) với 2 field — truyền qua 2 registers riêng biệt:
+//   x1 = Bundle._serializerSettings  (bỏ qua)
+//   x2 = Bundle.ProductId            (String* — đây là thứ cần lấy)
+//   x3 = validator (IValidator, null trong HAMOD vì không có GP)
+//   x4 = storeId
+//   x5 = mi
+void (*o_BuyIAPProduct)(void*, void*, void*, void*, int32_t, void*) = nullptr;
+void h_BuyIAPProduct(void* self,
+                     void* bundle_settings, // x1: Bundle._serializerSettings
+                     void* bundle_pid,      // x2: Bundle.ProductId ← String* cần lấy
+                     void* validator,       // x3: IValidator
+                     int32_t storeId,       // x4: StoreIdentifier
+                     void* mi) {            // x5: MethodInfo
+    if (g_feature0.load(std::memory_order_acquire)) {
+        if (bundle_pid) {
+            g_saved_iap_self  = self;
+            g_saved_productId = bundle_pid;
+            g_saved_storeId   = storeId;
+            LOGI("[FreeShop] context saved iap=%p storeId=%d pid=%p",
+                 self, storeId, bundle_pid);
         } else {
-            LOGE("[FreeShop] BuyIAPProduct: Bundle.ProductId offset not resolved yet");
+            LOGE("[FreeShop] BuyIAPProduct: bundle_pid(x2) null");
         }
     }
-    if (o_BuyIAPProduct) o_BuyIAPProduct(self, bundle, validator, storeId, mi);
+    if (o_BuyIAPProduct)
+        o_BuyIAPProduct(self, bundle_settings, bundle_pid, validator, storeId, mi);
 }
 
 // Hook 2: ListenerHandler.OnPurchaseFailure(self, reason, productInfo, description, storeId, mi)
