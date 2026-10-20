@@ -4,9 +4,9 @@
     {
       "type": "seekbar",
       "index": 0,
-      "name": "Sát thương ×2/5/20/999999",
-      "name_en": "Damage x2/5/20/999999",
-      "max": 4
+      "name": "Sát thương ×1-99999",
+      "name_en": "Damage x1-99999",
+      "max": 99999
     },
     {
       "type": "seekbar",
