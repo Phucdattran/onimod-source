@@ -341,18 +341,39 @@ static inline void sync_fwd() { o_lua_load_fwd = (t_lua_load2)o_lua_load; }
 "return ARD\n"
 
 #define LUA_WRAP_ADS \
-"local NAME='@game/sdk/adSystem.lua'\n" \
+"local NAME='@game/module/advertisement/Advertisement.lua'\n" \
 "local chunk=assert(__hthk_orig_load(NAME),'hthk:nil '..NAME)\n" \
 "local M=chunk(...)\n" \
 "if type(M)~='table' then return M end\n" \
-"local _show=M.ShowRewardAd\n" \
-"if type(_show)=='function' then\n" \
-"  function M:ShowRewardAd(id,cb,...)\n" \
+"local function patch_ad_sdk()\n" \
+"  local AD=KLLSDK and KLLSDK.AD\n" \
+"  if type(AD)~='table' then __hthk_log('ads:KLLSDK.AD=nil') return end\n" \
+"  if AD._hthk then return end\n" \
+"  AD._hthk=true\n" \
+"  local _init=AD.IsInitRewardAd\n" \
+"  AD.IsInitRewardAd=function(...) if __hthk_num(2)>=1 then return true end return _init and _init(...) end\n" \
+"  local _avail=AD.IsRewardAdAvailable\n" \
+"  AD.IsRewardAdAvailable=function(...) if __hthk_num(2)>=1 then return true end return _avail and _avail(...) end\n" \
+"  local _param=AD.SetRewardAdParam\n" \
+"  AD.SetRewardAdParam=function(...) if __hthk_num(2)>=1 then pcall(_param,...) return end return _param and _param(...) end\n" \
+"  local _show=AD.ShowRewardAd\n" \
+"  AD.ShowRewardAd=function(self,...)\n" \
 "    if __hthk_num(2)>=1 then\n" \
-"      if type(cb)=='function' then cb(true) end\n" \
-"      return\n" \
+"      if type(AD.OnRewardAdOpened)=='function' then pcall(function() AD:OnRewardAdOpened() end) end\n" \
+"      if type(AD.OnAdRewardSuccessCallBack)=='function' then pcall(function() AD:OnAdRewardSuccessCallBack() end) end\n" \
+"      if type(AD.OnRewardAdClosed)=='function' then pcall(function() AD:OnRewardAdClosed() end) end\n" \
+"      __hthk_log('ads:ShowRewardAd->fire callbacks')\n" \
+"      return true\n" \
 "    end\n" \
-"    return _show(self,id,cb,...)\n" \
+"    return _show(self,...)\n" \
+"  end\n" \
+"  __hthk_log('ads:KLLSDK.AD patched OK')\n" \
+"end\n" \
+"local _sc_begin=M.sc_advideo_begin\n" \
+"if type(_sc_begin)=='function' then\n" \
+"  M.sc_advideo_begin=function(self,...)\n" \
+"    if __hthk_num(2)>=1 then patch_ad_sdk() return _sc_begin(self,...) end\n" \
+"    return _sc_begin(self,...)\n" \
 "  end\n" \
 "end\n" \
 "return M\n"
@@ -365,7 +386,8 @@ static int h_lua_load(void* L, const char* buf, size_t sz,
         const char* wrapper = nullptr;
         if (strcmp(chunkname, "@battle/skill/base/object/attackResultData.lua") == 0)
             wrapper = LUA_WRAP_DAMAGE;
-        else if (strcmp(chunkname, "@game/sdk/adSystem.lua") == 0)
+        else if (strcmp(chunkname, "@game/module/advertisement/Advertisement.lua") == 0
+                 || strcmp(chunkname, "@game/module/advertisement/advertisement.lua") == 0)
             wrapper = LUA_WRAP_ADS;
         if (wrapper) {
             LOGI("intercept '%s'", chunkname);
