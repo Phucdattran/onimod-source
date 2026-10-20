@@ -357,16 +357,17 @@ float h_get_timeScale(void* mi) {
 // ═══════════════════════════════════════════════════════════
 //  FREE SHOP
 //
-//  HAMOD không có Google Play → VoodooSauce gọi OnPurchaseFailure với productInfo=null.
-//  LGL cần user bấm hủy (billing dialog xuất hiện, huỷ → productInfo non-null).
+//  HAMOD không có Google Play → billing không bao giờ bắt đầu →
+//  VoodooSauce gọi HandlePurchaseFailureByBundle(bundle, NOT_SUPPORTED, ...) →
+//  _listenerHandler.OnPurchaseFailure(reason, productInfo=null, desc, storeId).
+//  LGL cần user bấm hủy (billing dialog → huỷ → HandlePurchaseFailure với productInfo non-null).
 //
-//  Giải pháp 2 hook:
-//  1. Hook IAPMediator.BuyIAPProduct → lưu (self, productId, storeId)
+//  Giải pháp HAMOD:
+//  1. Hook IAPMediator.BuyIAPProduct → lưu (self_iap, productId=bundle+0x18, storeId)
+//     dump.cs: Bundle.ProductId (String) @ 0x18 (sau _serializerSettings @ 0x10)
 //  2. Hook ListenerHandler.OnPurchaseFailure:
 //     - Nếu productInfo=null → gọi IAPMediator.GetProductWithId(savedProductId, savedStoreId)
-//       để tái tạo productInfo
-//     - Sau đó gọi ListenerHandler.OnPurchaseComplete → toàn bộ dispatch chain chạy
-//       → cấp hàng + tắt spinner
+//     - Sau đó gọi ListenerHandler.OnPurchaseComplete → dispatch chain → cấp hàng + tắt spinner
 //
 //  dump.cs:
 //    IAPMediator (VoodooSauce.dll, Voodoo.Sauce.IAP):
@@ -375,6 +376,9 @@ float h_get_timeScale(void* mi) {
 //    ListenerHandler (Voodoo.IAP.dll, Voodoo.Sauce.IAP):
 //      OnPurchaseComplete(ProductReceivedInfo, StoreIdentifier)  // 0xB3CE6B8
 //      OnPurchaseFailure(reason, ProductReceivedInfo, String, StoreIdentifier)  // 0xB3CEC40
+//    Bundle (Voodoo.IAP.dll):
+//      _serializerSettings  @ 0x10  ← NOT productId, JSON settings object (always non-null)
+//      ProductId (String*)  @ 0x18  ← correct offset confirmed from dump.cs
 // ═══════════════════════════════════════════════════════════
 
 // Context lưu lại khi BuyIAPProduct được gọi
@@ -395,17 +399,16 @@ void (*o_BuyIAPProduct)(void*, void*, void*, int32_t, void*) = nullptr;
 void h_BuyIAPProduct(void* self, void* bundle, void* validator,
                      int32_t storeId, void* mi) {
     if (g_feature0.load(std::memory_order_acquire) && bundle) {
-        // Bundle.ProductId — thử offset 0x10 (field đầu) rồi 0x18 (field thứ hai)
-        void* pid = *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(bundle) + 0x10);
-        if (!pid)
-            pid = *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(bundle) + 0x18);
+        // Bundle.ProductId is at offset 0x18 (confirmed from dump.cs).
+        // offset 0x10 is _serializerSettings (JSON object, always non-null) — do NOT read it.
+        void* pid = *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(bundle) + 0x18);
         if (pid) {
             g_saved_iap_self  = self;
             g_saved_productId = pid;
             g_saved_storeId   = storeId;
-            LOGI("[FreeShop] context saved iap=%p storeId=%d", self, storeId);
+            LOGI("[FreeShop] context saved iap=%p storeId=%d pid=%p", self, storeId, pid);
         } else {
-            LOGE("[FreeShop] BuyIAPProduct: bundle=%p but productId=null at 0x10/0x18", bundle);
+            LOGE("[FreeShop] BuyIAPProduct: bundle=%p but ProductId null at +0x18", bundle);
         }
     }
     if (o_BuyIAPProduct) o_BuyIAPProduct(self, bundle, validator, storeId, mi);
