@@ -397,32 +397,41 @@ static void (*g_LH_OnPurchaseComplete)(void*, void*, int32_t, void*) = nullptr;
 static void* g_LH_OnPurchaseComplete_mi = nullptr;
 
 // Hook 1: IAPMediator.BuyIAPProduct(self, bundle, validator, storeId, mi)
-// Bundle là VALUE TYPE (struct) với 2 field — truyền qua 2 registers riêng biệt:
-//   x1 = Bundle._serializerSettings  (bỏ qua)
-//   x2 = Bundle.ProductId            (String* — đây là thứ cần lấy)
-//   x3 = validator (IValidator, null trong HAMOD vì không có GP)
-//   x4 = storeId
-//   x5 = mi
-void (*o_BuyIAPProduct)(void*, void*, void*, void*, int32_t, void*) = nullptr;
-void h_BuyIAPProduct(void* self,
-                     void* bundle_settings, // x1: Bundle._serializerSettings
-                     void* bundle_pid,      // x2: Bundle.ProductId ← String* cần lấy
-                     void* validator,       // x3: IValidator
-                     int32_t storeId,       // x4: StoreIdentifier
-                     void* mi) {            // x5: MethodInfo
-    if (g_feature0.load(std::memory_order_acquire)) {
-        if (bundle_pid) {
-            g_saved_iap_self  = self;
-            g_saved_productId = bundle_pid;
-            g_saved_storeId   = storeId;
-            LOGI("[FreeShop] context saved iap=%p storeId=%d pid=%p",
-                 self, storeId, bundle_pid);
-        } else {
-            LOGE("[FreeShop] BuyIAPProduct: bundle_pid(x2) null");
+// Bundle là reference type (class), bundle = x1 = pointer tới object.
+// Dump memory để tìm đúng offset của ProductId (String*).
+void (*o_BuyIAPProduct)(void*, void*, void*, int32_t, void*) = nullptr;
+void h_BuyIAPProduct(void* self, void* bundle, void* validator,
+                     int32_t storeId, void* mi) {
+    if (g_feature0.load(std::memory_order_acquire) && bundle) {
+        uintptr_t b = reinterpret_cast<uintptr_t>(bundle);
+        // Dump 7 slots: +0x08 đến +0x38 để tìm String* của ProductId
+        void* f08 = *reinterpret_cast<void**>(b + 0x08);
+        void* f10 = *reinterpret_cast<void**>(b + 0x10);
+        void* f18 = *reinterpret_cast<void**>(b + 0x18);
+        void* f20 = *reinterpret_cast<void**>(b + 0x20);
+        void* f28 = *reinterpret_cast<void**>(b + 0x28);
+        void* f30 = *reinterpret_cast<void**>(b + 0x30);
+        LOGI("[FreeShop] bundle=%p v=%p storeId=%d", bundle, validator, storeId);
+        LOGI("[FreeShop] +0x08=%p +0x10=%p +0x18=%p +0x20=%p +0x28=%p +0x30=%p",
+             f08, f10, f18, f20, f28, f30);
+        // Dùng dynamic class lookup để tìm offset thực sự
+        if (il2cpp_object_get_class && il2cpp_class_get_field_from_name && il2cpp_field_get_offset) {
+            void* kActual = il2cpp_object_get_class(bundle);
+            void* fPid = kActual ? il2cpp_class_get_field_from_name(kActual, OBFUSCATE("ProductId")) : nullptr;
+            int32_t off = fPid ? il2cpp_field_get_offset(fPid) : -1;
+            LOGI("[FreeShop] actualClass=%p ProductId offset=%d(0x%X)", kActual, off, off >= 0 ? (uint32_t)off : 0u);
+            if (off > 0) {
+                void* pid = *reinterpret_cast<void**>(b + (uint32_t)off);
+                LOGI("[FreeShop] pid@+0x%X = %p", (uint32_t)off, pid);
+                if (pid) {
+                    g_saved_iap_self  = self;
+                    g_saved_productId = pid;
+                    g_saved_storeId   = storeId;
+                }
+            }
         }
     }
-    if (o_BuyIAPProduct)
-        o_BuyIAPProduct(self, bundle_settings, bundle_pid, validator, storeId, mi);
+    if (o_BuyIAPProduct) o_BuyIAPProduct(self, bundle, validator, storeId, mi);
 }
 
 // Hook 2: ListenerHandler.OnPurchaseFailure(self, reason, productInfo, description, storeId, mi)
