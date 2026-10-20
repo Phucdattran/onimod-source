@@ -145,19 +145,19 @@ static bool FindLib(ElfImg& img,const char* libname){
     return ctx.found;
 }
 
-// -- IL2CPP API (nams phai khop voi extern trong LGLTrace.h) --
-static void*   (*il2cpp_domain_get)()                                        = nullptr;
-static void*   (*il2cpp_thread_attach)(void*)                                = nullptr;
-static void**  (*il2cpp_domain_get_assemblies)(void*,size_t*)                = nullptr;
-static void*   (*il2cpp_assembly_get_image)(void*)                           = nullptr;
-static void*   (*il2cpp_class_from_name)(void*,const char*,const char*)      = nullptr;
-static void*   (*il2cpp_class_get_method_from_name)(void*,const char*,int)   = nullptr;
-static void*   (*il2cpp_class_get_methods)(void*,void**)                     = nullptr;
-static const char* (*il2cpp_method_get_name)(void*)                          = nullptr;
-static uint32_t (*il2cpp_method_get_param_count)(void*)                      = nullptr;
-static size_t  (*il2cpp_image_get_class_count)(void*)                        = nullptr;
-static void*   (*il2cpp_image_get_class)(void*,size_t)                       = nullptr;
-static const char* (*il2cpp_class_get_name)(void*)                           = nullptr;
+// -- IL2CPP API (khong static - LGLTrace.h dung extern de tham chieu) --
+void*   (*il2cpp_domain_get)()                                        = nullptr;
+void*   (*il2cpp_thread_attach)(void*)                                = nullptr;
+void**  (*il2cpp_domain_get_assemblies)(void*,size_t*)                = nullptr;
+void*   (*il2cpp_assembly_get_image)(void*)                           = nullptr;
+void*   (*il2cpp_class_from_name)(void*,const char*,const char*)      = nullptr;
+void*   (*il2cpp_class_get_method_from_name)(void*,const char*,int)   = nullptr;
+void*   (*il2cpp_class_get_methods)(void*,void**)                     = nullptr;
+const char* (*il2cpp_method_get_name)(void*)                          = nullptr;
+uint32_t (*il2cpp_method_get_param_count)(void*)                      = nullptr;
+size_t  (*il2cpp_image_get_class_count)(void*)                        = nullptr;
+void*   (*il2cpp_image_get_class)(void*,size_t)                       = nullptr;
+const char* (*il2cpp_class_get_name)(void*)                           = nullptr;
 
 static bool InitIL2CppAPI(const ElfImg& img){
     ElfExports ex(img); if(!ex.init()){LOGE("ElfExports init FAIL");return false;}
@@ -185,8 +185,8 @@ static bool InitIL2CppAPI(const ElfImg& img){
     return ok;
 }
 
-// Ham can cho T_HOOK trong LGLTrace.h
-static void* FindClass(const char* ns,const char* cls){
+// Ham can cho T_HOOK trong LGLTrace.h (khong static - T_HOOK dung extern)
+void* FindClass(const char* ns,const char* cls){
     if(!il2cpp_domain_get||!il2cpp_domain_get_assemblies||!il2cpp_assembly_get_image||!il2cpp_class_from_name) return nullptr;
     void*domain=il2cpp_domain_get(); if(!domain) return nullptr;
     size_t n=0; void**asms=il2cpp_domain_get_assemblies(domain,&n);
@@ -197,7 +197,7 @@ static void* FindClass(const char* ns,const char* cls){
     return nullptr;
 }
 
-static void* FindClassAnywhere(const char* cls){
+void* FindClassAnywhere(const char* cls){
     if(!il2cpp_domain_get||!il2cpp_domain_get_assemblies||!il2cpp_assembly_get_image) return nullptr;
     void*domain=il2cpp_domain_get(); if(!domain) return nullptr;
     size_t n=0; void**asms=il2cpp_domain_get_assemblies(domain,&n);
@@ -216,7 +216,7 @@ static void* FindClassAnywhere(const char* cls){
     return nullptr;
 }
 
-static void* MethodAddr(const char* ns,const char* cls,const char* method,int n){
+void* MethodAddr(const char* ns,const char* cls,const char* method,int n){
     void*k=FindClass(ns,cls); if(!k) return nullptr;
     if(!il2cpp_class_get_method_from_name) return nullptr;
     void*m=il2cpp_class_get_method_from_name(k,method,n); if(!m) return nullptr;
