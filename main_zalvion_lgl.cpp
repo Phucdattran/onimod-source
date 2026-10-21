@@ -226,46 +226,42 @@ static void ApplySpeed() {
 //
 //  Luồng mua trong game:
 //    ShopItemDetailPopup.OnBuyClicked
-//      -> IapManager.CanBuy(sku)       [kiểm tra]
-//      -> IapManager.Buy(sku, done)    [gọi Google Play]
-//           -> Finish(sku, ok, code)   [callback xử lý kết quả]
+//      -> ShopScreen.PurchaseAsync(product)
+//           -> ShopScreen.PurchaseRealAsync(product)  [real-money IAP]
+//                -> IapManager.Buy(sku, done)
+//                     -> server verify -> OnContentGranted -> GrantContentList
 //
-//  Chiến lược:
-//    - CanBuy  → true (bỏ check cửa hàng)
-//    - OwnsSku → true (game nghĩ đã sở hữu)
-//    - Buy     → gọi thẳng Finish(sku, true, "") bỏ qua Google Play
+//  Chiến lược đúng:
+//    - CanBuy  → true (bỏ check IAP connected)
+//    - PurchaseRealAsync → gọi thẳng GrantContents(product) bỏ qua IAP
+//    - KHÔNG hook OwnsSku (hook đó chỉ hiện "đã sở hữu" mà không grant item)
 // ═══════════════════════════════════════════════════════════
 
-// Cache Finish để gọi từ h_Buy
-// dump.cs: private static Void Finish(String sku, Boolean ok, String code)
-// ARM64 static 3 param: (void* sku, bool ok, void* code, void* mi)
-static void (*p_Finish)(void*, bool, void*, void*) = nullptr;
+// Cache ShopScreen.GrantContents(Product p) — static, 1 param
+// ARM64 static: (void* product, void* mi)
+typedef void (*t_GrantContents)(void*, void*);
+static t_GrantContents g_fn_GrantContents = nullptr;
 
-// IapManager.Buy(string sku, Action<bool,string> done) — static, 2 param
-// ARM64: (void* sku, void* done, void* mi)
-typedef void (*t_Buy)(void*, void*, void*);
-static t_Buy o_Buy = nullptr;
-void h_Buy(void* sku, void* done, void* mi) {
-    T_COUNT(Buy);
+// ShopScreen.PurchaseRealAsync(Product p) — instance, 1 param
+// ARM64 instance: (void* this, void* product, void* mi)
+typedef void (*t_PurchaseRealAsync)(void*, void*, void*);
+static t_PurchaseRealAsync o_PurchaseRealAsync = nullptr;
+void h_PurchaseRealAsync(void* _this, void* product, void* mi) {
+    T_COUNT(PurchaseRealAsync);
     if (g_shop) {
-        LOGI("FreeShop: Buy intercepted -> Finish(true)");
-        void* empty = il2cpp_string_new ? il2cpp_string_new("") : nullptr;
-        if (p_Finish) p_Finish(sku, true, empty, nullptr);
-        return; // KHÔNG gọi o_Buy → không mở Google Play dialog
+        LOGI("FreeShop: PurchaseRealAsync intercepted -> GrantContents");
+        if (g_fn_GrantContents) {
+            g_fn_GrantContents(product, nullptr);
+        } else {
+            LOGE("FreeShop: GrantContents chua cache!");
+        }
+        return; // KHÔNG gọi original → bỏ qua IAP/Google Play
     }
-    if (o_Buy) o_Buy(sku, done, mi);
-}
-
-// IapManager.OwnsSku(string sku) — static, 1 param → bool
-typedef bool (*t_OwnsSku)(void*, void*);
-static t_OwnsSku o_OwnsSku = nullptr;
-bool h_OwnsSku(void* sku, void* mi) {
-    T_COUNT(OwnsSku);
-    if (g_shop) return true;
-    return o_OwnsSku ? o_OwnsSku(sku, mi) : false;
+    if (o_PurchaseRealAsync) o_PurchaseRealAsync(_this, product, mi);
 }
 
 // IapManager.CanBuy(string sku) — static, 1 param → bool
+// Giữ true để nút Buy luôn hiện (game check IAP connected trước khi cho mua)
 typedef bool (*t_CanBuy)(void*, void*);
 static t_CanBuy o_CanBuy = nullptr;
 bool h_CanBuy(void* sku, void* mi) {
@@ -285,34 +281,35 @@ static void ResolveAll() {
     T_HOOK("UnityEngine", "Time", "set_timeScale", 1, setTS);
     if (o_getTS) g_gameScale = o_getTS(nullptr);
 
-    // [1] Free Shop — IapManager (namespace rỗng, Assembly-CSharp)
+    // [1] Free Shop
+    // Bước A: IapManager.CanBuy → true (để nút Buy luôn hiện)
     void* kIap = FindClassAnywhere(OBFUSCATE("IapManager"));
     if (kIap) {
-        // Cache Finish (private, không dùng T_HOOK)
-        void* mFinish = FindMethod(kIap, OBFUSCATE("Finish"), 3);
-        if (mFinish) {
-            p_Finish = (decltype(p_Finish)) MethodFnPtr(mFinish);
-            LOGI("Finish cached: %p", (void*)p_Finish);
-        } else {
-            LOGE("Finish(3) not found");
-        }
-
-        // Hook Buy(2)
-        void* mBuy = FindMethod(kIap, OBFUSCATE("Buy"), 2);
-        if (mBuy) DoHook(MethodFnPtr(mBuy), (void*)h_Buy, (void**)&o_Buy, "IapManager.Buy");
-        else      LOGE("IapManager.Buy(2) not found");
-
-        // Hook OwnsSku(1)
-        void* mOwns = FindMethod(kIap, OBFUSCATE("OwnsSku"), 1);
-        if (mOwns) DoHook(MethodFnPtr(mOwns), (void*)h_OwnsSku, (void**)&o_OwnsSku, "IapManager.OwnsSku");
-        else       LOGE("IapManager.OwnsSku(1) not found");
-
-        // Hook CanBuy(1)
         void* mCan = FindMethod(kIap, OBFUSCATE("CanBuy"), 1);
         if (mCan) DoHook(MethodFnPtr(mCan), (void*)h_CanBuy, (void**)&o_CanBuy, "IapManager.CanBuy");
         else      LOGE("IapManager.CanBuy(1) not found");
     } else {
         LOGE("IapManager class NOT FOUND");
+    }
+
+    // Bước B: ShopScreen.PurchaseRealAsync → GrantContents (grant item thật)
+    void* kShop = FindClassAnywhere(OBFUSCATE("ShopScreen"));
+    if (kShop) {
+        // Cache GrantContents (private static, không dùng T_HOOK)
+        void* mGrant = FindMethod(kShop, OBFUSCATE("GrantContents"), 1);
+        if (mGrant) {
+            g_fn_GrantContents = (decltype(g_fn_GrantContents)) MethodFnPtr(mGrant);
+            LOGI("GrantContents cached: %p", (void*)g_fn_GrantContents);
+        } else {
+            LOGE("ShopScreen.GrantContents(1) not found");
+        }
+
+        // Hook PurchaseRealAsync(1) — chặn IAP, gọi GrantContents trực tiếp
+        void* mPRA = FindMethod(kShop, OBFUSCATE("PurchaseRealAsync"), 1);
+        if (mPRA) DoHook(MethodFnPtr(mPRA), (void*)h_PurchaseRealAsync, (void**)&o_PurchaseRealAsync, "ShopScreen.PurchaseRealAsync");
+        else      LOGE("ShopScreen.PurchaseRealAsync(1) not found");
+    } else {
+        LOGE("ShopScreen class NOT FOUND");
     }
 
     TraceReport();
