@@ -428,5 +428,29 @@ extern "C" JNIEXPORT jstring JNICALL Java_com_android_support_Menu_getMenuTitle(
 extern "C" JNIEXPORT jstring JNICALL Java_com_android_support_Menu_getMenuSubtitle(JNIEnv*env,jclass){
     return env->NewStringUTF("LGL Mod");
 }
+extern "C" JNIEXPORT jstring JNICALL Java_com_android_support_Menu_getZaloText(JNIEnv*env,jclass){
+    return env->NewStringUTF("");
+}
+extern "C" JNIEXPORT jstring JNICALL Java_com_android_support_Menu_getZaloLink(JNIEnv*env,jclass){
+    return env->NewStringUTF("");
+}
+extern "C" JNIEXPORT jstring JNICALL Java_com_android_support_Menu_getTeleText(JNIEnv*env,jclass){
+    return env->NewStringUTF("");
+}
+extern "C" JNIEXPORT jstring JNICALL Java_com_android_support_Menu_getTeleLink(JNIEnv*env,jclass){
+    return env->NewStringUTF("");
+}
+extern "C" JNIEXPORT jstring JNICALL Java_com_android_support_Menu_getWebText(JNIEnv*env,jclass){
+    return env->NewStringUTF("");
+}
+extern "C" JNIEXPORT jstring JNICALL Java_com_android_support_Menu_getWebLink(JNIEnv*env,jclass){
+    return env->NewStringUTF("");
+}
+extern "C" JNIEXPORT jstring JNICALL Java_com_android_support_Menu_IconWebViewData(JNIEnv*env,jclass){
+    return env->NewStringUTF("");
+}
+extern "C" JNIEXPORT jboolean JNICALL Java_com_android_support_Menu_VerifyKeyNative(JNIEnv*,jclass,jstring){
+    return JNI_TRUE;
+}
 
 #include "Includes/JNI_Boilerplate.h"
