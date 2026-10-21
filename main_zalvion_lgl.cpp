@@ -234,10 +234,11 @@ static void ApplySpeed() {
 //          → không có nút Buy → PurchaseRealAsync/PurchaseLocal không bao giờ chạy
 //
 //  Chiến lược:
-//    - OwnsCosmeticProduct → false (luôn hiện nút Buy)
 //    - CanBuy              → true  (bỏ check IAP connected)
-//    - PurchaseRealAsync   → GrantContents (bỏ qua IAP)
-//    - PurchaseLocal       → GrantContents (bỏ qua trừ vàng)
+//    - PurchaseRealAsync   → GrantContents + OwnedAdd(sku)
+//    - PurchaseLocal       → GrantContents + OwnedAdd(sku)
+//    - VipStatus.get_IsVip → true  (VIP server-side, GrantContents ko grant được)
+//    OwnedAdd(sku) sau purchase: OwnsCosmeticProduct tự trả true → hiện "Đã sở hữu"
 // ═══════════════════════════════════════════════════════════
 
 // Cache ShopScreen.GrantContents(Product p) — private static, 1 param
@@ -245,14 +246,19 @@ static void ApplySpeed() {
 typedef void (*t_GrantContents)(void*, void*);
 static t_GrantContents g_fn_GrantContents = nullptr;
 
-// ShopScreen.OwnsCosmeticProduct(Product p) — private static, 1 param → bool
-// ARM64 static: (void* product, void* mi)
-typedef bool (*t_OwnsCosmeticProduct)(void*, void*);
-static t_OwnsCosmeticProduct o_OwnsCosmeticProduct = nullptr;
-bool h_OwnsCosmeticProduct(void* product, void* mi) {
-    T_COUNT(OwnsCosmeticProduct);
-    if (g_shop) return false; // luôn hiện nút Buy
-    return o_OwnsCosmeticProduct ? o_OwnsCosmeticProduct(product, mi) : false;
+// Cache IapManager.OwnedAdd(string sku) — private static, 1 param
+// Dùng sau GrantContents để OwnsCosmeticProduct tự trả true (hiện "Đã sở hữu")
+typedef void (*t_OwnedAdd)(void*, void*);
+static t_OwnedAdd g_fn_OwnedAdd = nullptr;
+
+// VipStatus.get_IsVip() — static, 0 param → bool
+// VIP là server-side, GrantContents không grant được → hook getter
+typedef bool (*t_IsVip)(void*);
+static t_IsVip o_IsVip = nullptr;
+bool h_IsVip(void* mi) {
+    T_COUNT(IsVip);
+    if (g_shop) return true;
+    return o_IsVip ? o_IsVip(mi) : false;
 }
 
 // ShopScreen.PurchaseRealAsync(Product p) — private instance, 1 param
@@ -265,6 +271,11 @@ void h_PurchaseRealAsync(void* _this, void* product, void* mi) {
         LOGI("FreeShop: PurchaseRealAsync -> GrantContents");
         if (g_fn_GrantContents) g_fn_GrantContents(product, nullptr);
         else LOGE("FreeShop: GrantContents chua cache!");
+        // Mark sku owned -> OwnsCosmeticProduct = true lan sau
+        if (g_fn_OwnedAdd && product) {
+            void* sku = *(void**)((uintptr_t)product + 0x10);
+            if (sku) { g_fn_OwnedAdd(sku, nullptr); LOGI("FreeShop: OwnedAdd(sku) OK"); }
+        }
         return;
     }
     if (o_PurchaseRealAsync) o_PurchaseRealAsync(_this, product, mi);
@@ -280,6 +291,11 @@ void h_PurchaseLocal(void* _this, void* product, void* mi) {
         LOGI("FreeShop: PurchaseLocal -> GrantContents");
         if (g_fn_GrantContents) g_fn_GrantContents(product, nullptr);
         else LOGE("FreeShop: GrantContents chua cache!");
+        // Mark sku owned -> OwnsCosmeticProduct = true lan sau
+        if (g_fn_OwnedAdd && product) {
+            void* sku = *(void**)((uintptr_t)product + 0x10);
+            if (sku) { g_fn_OwnedAdd(sku, nullptr); LOGI("FreeShop: OwnedAdd(sku) OK"); }
+        }
         return;
     }
     if (o_PurchaseLocal) o_PurchaseLocal(_this, product, mi);
@@ -311,9 +327,21 @@ static void ResolveAll() {
         void* mCan = FindMethod(kIap, OBFUSCATE("CanBuy"), 1);
         if (mCan) DoHook(MethodFnPtr(mCan), (void*)h_CanBuy, (void**)&o_CanBuy, "IapManager.CanBuy");
         else      LOGE("IapManager.CanBuy(1) not found");
+
+        // Cache OwnedAdd(sku) — private static, dùng để đánh dấu đã sở hữu sau purchase
+        void* mAdd = FindMethod(kIap, OBFUSCATE("OwnedAdd"), 1);
+        if (mAdd) {
+            g_fn_OwnedAdd = (decltype(g_fn_OwnedAdd)) MethodFnPtr(mAdd);
+            LOGI("OwnedAdd cached: %p", (void*)g_fn_OwnedAdd);
+        } else {
+            LOGE("IapManager.OwnedAdd(1) not found");
+        }
     } else {
         LOGE("IapManager class NOT FOUND");
     }
+
+    // VipStatus.get_IsVip() → true khi g_shop ON (VIP server-side, GrantContents ko grant được)
+    T_HOOK("", "VipStatus", "get_IsVip", 0, IsVip);
 
     void* kShop = FindClassAnywhere(OBFUSCATE("ShopScreen"));
     if (kShop) {
@@ -325,11 +353,6 @@ static void ResolveAll() {
         } else {
             LOGE("ShopScreen.GrantContents(1) not found");
         }
-
-        // OwnsCosmeticProduct → false (nút Buy luôn hiện, không bị kẹt "đã sở hữu")
-        void* mOwns = FindMethod(kShop, OBFUSCATE("OwnsCosmeticProduct"), 1);
-        if (mOwns) DoHook(MethodFnPtr(mOwns), (void*)h_OwnsCosmeticProduct, (void**)&o_OwnsCosmeticProduct, "ShopScreen.OwnsCosmeticProduct");
-        else       LOGE("ShopScreen.OwnsCosmeticProduct(1) not found");
 
         // PurchaseRealAsync → GrantContents (gói real-money)
         void* mPRA = FindMethod(kShop, OBFUSCATE("PurchaseRealAsync"), 1);
