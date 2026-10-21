@@ -224,44 +224,68 @@ static void ApplySpeed() {
 // ═══════════════════════════════════════════════════════════
 //  6. FREE SHOP
 //
-//  Luồng mua trong game:
+//  Luồng trong game:
 //    ShopItemDetailPopup.OnBuyClicked
 //      -> ShopScreen.PurchaseAsync(product)
 //           -> ShopScreen.PurchaseRealAsync(product)  [real-money IAP]
-//                -> IapManager.Buy(sku, done)
-//                     -> server verify -> OnContentGranted -> GrantContentList
+//           -> ShopScreen.PurchaseLocal(product)      [giá vàng]
 //
-//  Chiến lược đúng:
-//    - CanBuy  → true (bỏ check IAP connected)
-//    - PurchaseRealAsync → gọi thẳng GrantContents(product) bỏ qua IAP
-//    - KHÔNG hook OwnsSku (hook đó chỉ hiện "đã sở hữu" mà không grant item)
+//  Vấn đề: OwnsCosmeticProduct → true (từ session cũ) → shop hiện "đã sở hữu"
+//          → không có nút Buy → PurchaseRealAsync/PurchaseLocal không bao giờ chạy
+//
+//  Chiến lược:
+//    - OwnsCosmeticProduct → false (luôn hiện nút Buy)
+//    - CanBuy              → true  (bỏ check IAP connected)
+//    - PurchaseRealAsync   → GrantContents (bỏ qua IAP)
+//    - PurchaseLocal       → GrantContents (bỏ qua trừ vàng)
 // ═══════════════════════════════════════════════════════════
 
-// Cache ShopScreen.GrantContents(Product p) — static, 1 param
+// Cache ShopScreen.GrantContents(Product p) — private static, 1 param
 // ARM64 static: (void* product, void* mi)
 typedef void (*t_GrantContents)(void*, void*);
 static t_GrantContents g_fn_GrantContents = nullptr;
 
-// ShopScreen.PurchaseRealAsync(Product p) — instance, 1 param
+// ShopScreen.OwnsCosmeticProduct(Product p) — private static, 1 param → bool
+// ARM64 static: (void* product, void* mi)
+typedef bool (*t_OwnsCosmeticProduct)(void*, void*);
+static t_OwnsCosmeticProduct o_OwnsCosmeticProduct = nullptr;
+bool h_OwnsCosmeticProduct(void* product, void* mi) {
+    T_COUNT(OwnsCosmeticProduct);
+    if (g_shop) return false; // luôn hiện nút Buy
+    return o_OwnsCosmeticProduct ? o_OwnsCosmeticProduct(product, mi) : false;
+}
+
+// ShopScreen.PurchaseRealAsync(Product p) — private instance, 1 param
 // ARM64 instance: (void* this, void* product, void* mi)
 typedef void (*t_PurchaseRealAsync)(void*, void*, void*);
 static t_PurchaseRealAsync o_PurchaseRealAsync = nullptr;
 void h_PurchaseRealAsync(void* _this, void* product, void* mi) {
     T_COUNT(PurchaseRealAsync);
     if (g_shop) {
-        LOGI("FreeShop: PurchaseRealAsync intercepted -> GrantContents");
-        if (g_fn_GrantContents) {
-            g_fn_GrantContents(product, nullptr);
-        } else {
-            LOGE("FreeShop: GrantContents chua cache!");
-        }
-        return; // KHÔNG gọi original → bỏ qua IAP/Google Play
+        LOGI("FreeShop: PurchaseRealAsync -> GrantContents");
+        if (g_fn_GrantContents) g_fn_GrantContents(product, nullptr);
+        else LOGE("FreeShop: GrantContents chua cache!");
+        return;
     }
     if (o_PurchaseRealAsync) o_PurchaseRealAsync(_this, product, mi);
 }
 
+// ShopScreen.PurchaseLocal(Product p) — private instance, 1 param
+// ARM64 instance: (void* this, void* product, void* mi)
+typedef void (*t_PurchaseLocal)(void*, void*, void*);
+static t_PurchaseLocal o_PurchaseLocal = nullptr;
+void h_PurchaseLocal(void* _this, void* product, void* mi) {
+    T_COUNT(PurchaseLocal);
+    if (g_shop) {
+        LOGI("FreeShop: PurchaseLocal -> GrantContents");
+        if (g_fn_GrantContents) g_fn_GrantContents(product, nullptr);
+        else LOGE("FreeShop: GrantContents chua cache!");
+        return;
+    }
+    if (o_PurchaseLocal) o_PurchaseLocal(_this, product, mi);
+}
+
 // IapManager.CanBuy(string sku) — static, 1 param → bool
-// Giữ true để nút Buy luôn hiện (game check IAP connected trước khi cho mua)
 typedef bool (*t_CanBuy)(void*, void*);
 static t_CanBuy o_CanBuy = nullptr;
 bool h_CanBuy(void* sku, void* mi) {
@@ -282,7 +306,6 @@ static void ResolveAll() {
     if (o_getTS) g_gameScale = o_getTS(nullptr);
 
     // [1] Free Shop
-    // Bước A: IapManager.CanBuy → true (để nút Buy luôn hiện)
     void* kIap = FindClassAnywhere(OBFUSCATE("IapManager"));
     if (kIap) {
         void* mCan = FindMethod(kIap, OBFUSCATE("CanBuy"), 1);
@@ -292,10 +315,9 @@ static void ResolveAll() {
         LOGE("IapManager class NOT FOUND");
     }
 
-    // Bước B: ShopScreen.PurchaseRealAsync → GrantContents (grant item thật)
     void* kShop = FindClassAnywhere(OBFUSCATE("ShopScreen"));
     if (kShop) {
-        // Cache GrantContents (private static, không dùng T_HOOK)
+        // Cache GrantContents (private static)
         void* mGrant = FindMethod(kShop, OBFUSCATE("GrantContents"), 1);
         if (mGrant) {
             g_fn_GrantContents = (decltype(g_fn_GrantContents)) MethodFnPtr(mGrant);
@@ -304,10 +326,20 @@ static void ResolveAll() {
             LOGE("ShopScreen.GrantContents(1) not found");
         }
 
-        // Hook PurchaseRealAsync(1) — chặn IAP, gọi GrantContents trực tiếp
+        // OwnsCosmeticProduct → false (nút Buy luôn hiện, không bị kẹt "đã sở hữu")
+        void* mOwns = FindMethod(kShop, OBFUSCATE("OwnsCosmeticProduct"), 1);
+        if (mOwns) DoHook(MethodFnPtr(mOwns), (void*)h_OwnsCosmeticProduct, (void**)&o_OwnsCosmeticProduct, "ShopScreen.OwnsCosmeticProduct");
+        else       LOGE("ShopScreen.OwnsCosmeticProduct(1) not found");
+
+        // PurchaseRealAsync → GrantContents (gói real-money)
         void* mPRA = FindMethod(kShop, OBFUSCATE("PurchaseRealAsync"), 1);
         if (mPRA) DoHook(MethodFnPtr(mPRA), (void*)h_PurchaseRealAsync, (void**)&o_PurchaseRealAsync, "ShopScreen.PurchaseRealAsync");
         else      LOGE("ShopScreen.PurchaseRealAsync(1) not found");
+
+        // PurchaseLocal → GrantContents (gói giá vàng, bỏ qua trừ vàng)
+        void* mPL = FindMethod(kShop, OBFUSCATE("PurchaseLocal"), 1);
+        if (mPL) DoHook(MethodFnPtr(mPL), (void*)h_PurchaseLocal, (void**)&o_PurchaseLocal, "ShopScreen.PurchaseLocal");
+        else     LOGE("ShopScreen.PurchaseLocal(1) not found");
     } else {
         LOGE("ShopScreen class NOT FOUND");
     }
