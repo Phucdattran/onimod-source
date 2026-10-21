@@ -310,13 +310,14 @@ static void ResolveAll(){
 
 // -- il2cpp_init hook (ban mau v2.2 - KHONG SUA) --
 static std::atomic<bool> g_il2cpp_ready{false};
-typedef void (*t_il2cpp_init)(const char*,int,int);
+typedef void* (*t_il2cpp_init)(const char*,int,int);
 static t_il2cpp_init o_il2cpp_init=nullptr;
-static void h_il2cpp_init(const char*domain,int n_threads,int flags){
+static void* h_il2cpp_init(const char*domain,int n_threads,int flags){
     T_COUNT(il2cpp_init);
-    if(o_il2cpp_init) o_il2cpp_init(domain,n_threads,flags);
+    void*result=o_il2cpp_init?o_il2cpp_init(domain,n_threads,flags):nullptr;
     g_il2cpp_ready.store(true,std::memory_order_release);
     LOGI("il2cpp_init xong");
+    return result;
 }
 
 static void* mod_thread(void*){
