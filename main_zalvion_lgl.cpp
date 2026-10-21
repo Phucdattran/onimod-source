@@ -310,6 +310,16 @@ bool h_CanBuy(void* sku, void* mi) {
     return o_CanBuy ? o_CanBuy(sku, mi) : false;
 }
 
+// AdService.get_UseFakeAds() — private static, 0 params → bool
+// Khi true: ShowRewarded gọi ShowFakeAd(onComplete) thay vì real ad → bỏ QC revive
+typedef bool (*t_UseFakeAds)(void*);
+static t_UseFakeAds o_UseFakeAds = nullptr;
+bool h_UseFakeAds(void* mi) {
+    T_COUNT(UseFakeAds);
+    if (g_shop) return true;
+    return o_UseFakeAds ? o_UseFakeAds(mi) : false;
+}
+
 // ═══════════════════════════════════════════════════════════
 //  7. GẮN HOOK
 // ═══════════════════════════════════════════════════════════
@@ -342,6 +352,9 @@ static void ResolveAll() {
 
     // VipStatus.get_IsVip() → true khi g_shop ON (VIP server-side, GrantContents ko grant được)
     T_HOOK("", "VipStatus", "get_IsVip", 0, IsVip);
+
+    // AdService.get_UseFakeAds() → true khi g_shop ON → ShowRewarded dùng ShowFakeAd → bỏ QC
+    T_HOOK("", "AdService", "get_UseFakeAds", 0, UseFakeAds);
 
     void* kShop = FindClassAnywhere(OBFUSCATE("ShopScreen"));
     if (kShop) {
