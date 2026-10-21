@@ -425,5 +425,8 @@ static void CheckOverlayPermission(JNIEnv*,jclass,jobject){}
 extern "C" JNIEXPORT jstring JNICALL Java_com_android_support_Menu_getMenuTitle(JNIEnv*env,jclass){
     return env->NewStringUTF(GAME_NAME);
 }
+extern "C" JNIEXPORT jstring JNICALL Java_com_android_support_Menu_getMenuSubtitle(JNIEnv*env,jclass){
+    return env->NewStringUTF("LGL Mod");
+}
 
 #include "Includes/JNI_Boilerplate.h"
