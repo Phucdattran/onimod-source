@@ -234,11 +234,12 @@ static void ApplySpeed() {
 
 // ═══════════════════════════════════════════════════════════
 //  6. FREE SHOP
-//  InventoryModel.HasEnough(ItemId itemId, int expectedAmount) instance 2 params
-//  → return true khi g_shop (bypass affordability check)
-//  InventoryModel.Remove(ItemId id, int amount, string source) instance 3 params
-//  → no-op khi g_shop (không trừ tài nguyên)
+//  Luồng crystal: HasEnough → true, Remove → noop (bỏ qua trừ tiền)
+//  Luồng IAP (real money): StoreListener.BuyProduct → BuyProductDebug
+//    (BuyProductDebug bỏ qua Google Play, tự gọi ProcessPurchase → cấp đồ)
 // ═══════════════════════════════════════════════════════════
+
+// ── Crystal path ──
 typedef bool (*t_HasEnough)(void*, int32_t, int32_t, void*);
 static t_HasEnough o_HasEnough = nullptr;
 
@@ -255,6 +256,21 @@ void h_Remove(void* self, int32_t itemId, int32_t amount, void* source, void* mi
     T_COUNT(Remove);
     if (g_shop) return;
     if (o_Remove) o_Remove(self, itemId, amount, source, mi);
+}
+
+// ── IAP path ──
+typedef void (*t_SL_BuyProduct)(void*, void*, void*, void*);
+static t_SL_BuyProduct o_SL_BuyProduct       = nullptr;
+static t_SL_BuyProduct g_SL_BuyProductDebug  = nullptr;
+
+void h_SL_BuyProduct(void* self, void* id, void* callback, void* mi) {
+    T_COUNT(SL_BuyProduct);
+    if (g_shop && g_SL_BuyProductDebug) {
+        LOGI("FreeShop: IAP BuyProduct -> BuyProductDebug");
+        g_SL_BuyProductDebug(self, id, callback, nullptr);
+        return;
+    }
+    if (o_SL_BuyProduct) o_SL_BuyProduct(self, id, callback, mi);
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -338,9 +354,21 @@ static void ResolveAll() {
     T_HOOK("UnityEngine", "Time", "set_timeScale", 1, setTS);
     if (o_getTS) g_gameScale = o_getTS(nullptr);
 
-    // [1] Free Shop — InventoryModel.HasEnough + Remove (bypass affordability + payment)
+    // [1] Free Shop — crystal: HasEnough+Remove; IAP: BuyProduct→BuyProductDebug
     T_HOOK("WesternBreaker", "InventoryModel", "HasEnough", 2, HasEnough);
     T_HOOK("WesternBreaker", "InventoryModel", "Remove", 3, Remove);
+    T_HOOK("", "StoreListener", "BuyProduct", 2, SL_BuyProduct);
+    {
+        void* slKlass = FindClassAnywhere("StoreListener");
+        if (slKlass) {
+            void* dbgMi = FindMethod(slKlass, "BuyProductDebug", 2);
+            g_SL_BuyProductDebug = (t_SL_BuyProduct)MethodFnPtr(dbgMi);
+            LOGI("BuyProductDebug cache: %s @ %p",
+                 g_SL_BuyProductDebug ? "OK" : "NULL", (void*)g_SL_BuyProductDebug);
+        } else {
+            LOGE("StoreListener class NOT FOUND");
+        }
+    }
 
     // [2] Remove Ads — DontShowAdsByPlacement (chặn QC ngầm)
     //     IsRewardedVideoAvailable -> true (nút reward bấm được ngay)
