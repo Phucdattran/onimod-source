@@ -228,7 +228,7 @@ static float g_speed = 1.0f;   // [0] Speed x1-10
 static bool  g_shop  = false;  // [1] Free Shop
 
 // Cache cho Free Shop
-static void* s_IAPKlass          = nullptr;
+static void* s_IAPKlass           = nullptr;
 static void* s_GrantOnceRewardsMI = nullptr;  // MethodInfo* của GrantOnceRewards(1)
 
 // ═══════════════════════════════════════════════════════════
@@ -251,7 +251,44 @@ static void ApplySpeed() {
 }
 
 // ═══════════════════════════════════════════════════════════
-//  6. FREE SHOP
+//  6. ENTITLEMENT HOOKS (VIP / AdFree subscription)
+//     Khi g_shop=true: game luôn thấy mọi subscription là đang active
+// ═══════════════════════════════════════════════════════════
+
+// HasActiveEntitlement(string productId) → bool
+bool (*o_HasActiveEntitlement)(void*, void*, void*) = nullptr;
+bool h_HasActiveEntitlement(void* self, void* productId, void* mi) {
+    T_COUNT(HasActiveEntitlement);
+    if (g_shop) return true;
+    return o_HasActiveEntitlement ? o_HasActiveEntitlement(self, productId, mi) : false;
+}
+
+// GetEntitlementRemainingDays(string productId) → int
+int (*o_GetEntitlementRemainingDays)(void*, void*, void*) = nullptr;
+int h_GetEntitlementRemainingDays(void* self, void* productId, void* mi) {
+    T_COUNT(GetEntitlementRemainingDays);
+    if (g_shop) return 30;
+    return o_GetEntitlementRemainingDays ? o_GetEntitlementRemainingDays(self, productId, mi) : 0;
+}
+
+// TryFreeRewardAd() → bool  (ad-free token check)
+bool (*o_TryFreeRewardAd)(void*, void*) = nullptr;
+bool h_TryFreeRewardAd(void* self, void* mi) {
+    T_COUNT(TryFreeRewardAd);
+    if (g_shop) return true;
+    return o_TryFreeRewardAd ? o_TryFreeRewardAd(self, mi) : false;
+}
+
+// GetAdFreeRemainingToday(string productId) → int
+int (*o_GetAdFreeRemainingToday)(void*, void*, void*) = nullptr;
+int h_GetAdFreeRemainingToday(void* self, void* productId, void* mi) {
+    T_COUNT(GetAdFreeRemainingToday);
+    if (g_shop) return 20;
+    return o_GetAdFreeRemainingToday ? o_GetAdFreeRemainingToday(self, productId, mi) : 0;
+}
+
+// ═══════════════════════════════════════════════════════════
+//  7-A. FREE SHOP — TryPurchase
 //     Hook IAPClientManager.TryPurchase (instance, 2 params)
 //     Khi bật: gọi GrantOnceRewards(productId) cấp đồ thẳng,
 //              invoke callback onResult(Success=0) để UI cập nhật,
@@ -300,8 +337,12 @@ static void ResolveAll() {
     T_HOOK("UnityEngine", "Time", "set_timeScale", 1, setTS);
     if (o_getTS) g_gameScale = o_getTS(nullptr);
 
-    // [1] Free Shop: hook TryPurchase
+    // [1] Free Shop: hook TryPurchase + entitlement checks
     T_HOOK("", "IAPClientManager", "TryPurchase", 2, TryPurchase);
+    T_HOOK("", "IAPClientManager", "HasActiveEntitlement", 1, HasActiveEntitlement);
+    T_HOOK("", "IAPClientManager", "GetEntitlementRemainingDays", 1, GetEntitlementRemainingDays);
+    T_HOOK("", "IAPClientManager", "TryFreeRewardAd", 0, TryFreeRewardAd);
+    T_HOOK("", "IAPClientManager", "GetAdFreeRemainingToday", 1, GetAdFreeRemainingToday);
 
     // Cache GrantOnceRewards để gọi trong hook
     s_IAPKlass = FindClassAnywhere("IAPClientManager");
