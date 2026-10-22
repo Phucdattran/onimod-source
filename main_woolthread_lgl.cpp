@@ -277,6 +277,7 @@ static void ApplySpeed() {
 static void* g_txInfoKlass = nullptr;
 typedef void (*t_HandleTxFinished)(void* self, void* ti, void* mi);
 static t_HandleTxFinished s_HandleTxFinished = nullptr;
+static void* s_HandleTxFinishedMI = nullptr; // MethodInfo* — bắt buộc truyền, nullptr crash
 
 typedef void (*t_PurchaseProduct)(void* self, void* productId, void* payload, void* mi);
 static t_PurchaseProduct o_PurchaseProduct = nullptr;
@@ -291,7 +292,7 @@ void h_PurchaseProduct(void* self, void* productId, void* payload, void* mi) {
                 *(void**)((uint8_t*)ti + 0x10) = productId; // ProductId (string managed)
                 *(int*)  ((uint8_t*)ti + 0x28) = 1;          // Quantity = 1
                 *(int*)  ((uint8_t*)ti + 0x2C) = 1;          // State = Purchased
-                s_HandleTxFinished(self, ti, nullptr);
+                s_HandleTxFinished(self, ti, s_HandleTxFinishedMI);
                 LOGI("FreeShop: PurchaseProduct giam -> HandleTransactionFinished gia OK");
                 return;
             }
@@ -365,8 +366,9 @@ static void ResolveAll() {
     if (psKlass) {
         void* mi = FindMethod(psKlass, "HandleTransactionFinished", 1);
         if (mi) {
-            s_HandleTxFinished = (t_HandleTxFinished) MethodFnPtr(mi);
-            LOGI("HandleTransactionFinished: OK @ %p", (void*)s_HandleTxFinished);
+            s_HandleTxFinished   = (t_HandleTxFinished) MethodFnPtr(mi);
+            s_HandleTxFinishedMI = mi;
+            LOGI("HandleTransactionFinished: OK @ %p MI=%p", (void*)s_HandleTxFinished, mi);
         } else {
             LOGE("HandleTransactionFinished(1): FAIL (FreeShop se khong chay)");
         }
@@ -411,7 +413,9 @@ void Changes(JNIEnv* env, jclass, jobject,
     switch (featNum) {
         case 0:
             g_speed = (value < 1) ? 1.0f : (float) value;
-            ApplySpeed();
+            // KHÔNG gọi ApplySpeed() ở đây — Changes() chạy trên JNI thread chưa attach IL2CPP
+            // Speed sẽ tự áp dụng khi hook set_timeScale được game gọi tiếp theo
+            LOGI("Speed: cap nhat %.1f (se ap dung khi game goi timeScale tiep theo)", g_speed);
             break;
         case 1:
             g_shop = boolean;
