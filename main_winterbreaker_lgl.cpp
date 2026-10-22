@@ -234,27 +234,34 @@ static void ApplySpeed() {
 
 // ═══════════════════════════════════════════════════════════
 //  6. FREE SHOP
-//  WesternBreaker.StoreModel.BuyProduct(string id, Action<bool> callback)
-//  instance, 2 params — hook -> invoke callback(true)
+//  InventoryModel.HasEnough(ItemId itemId, int expectedAmount) instance 2 params
+//  → return true khi g_shop (bypass affordability check)
+//  InventoryModel.Remove(ItemId id, int amount, string source) instance 3 params
+//  → no-op khi g_shop (không trừ tài nguyên)
 // ═══════════════════════════════════════════════════════════
-typedef void (*t_BuyProduct)(void*, void*, void*, void*);
-static t_BuyProduct o_BuyProduct = nullptr;
+typedef bool (*t_HasEnough)(void*, int32_t, int32_t, void*);
+static t_HasEnough o_HasEnough = nullptr;
 
-void h_BuyProduct(void* self, void* id, void* callback, void* mi) {
-    T_COUNT(BuyProduct);
-    if (g_shop) {
-        LOGI("FreeShop: BuyProduct -> callback(true)");
-        if (!InvokeBoolCallback(callback, true))
-            LOGE("FreeShop: InvokeBoolCallback FAIL");
-        return;
-    }
-    if (o_BuyProduct) o_BuyProduct(self, id, callback, mi);
+bool h_HasEnough(void* self, int32_t itemId, int32_t expectedAmount, void* mi) {
+    T_COUNT(HasEnough);
+    if (g_shop) return true;
+    return o_HasEnough ? o_HasEnough(self, itemId, expectedAmount, mi) : false;
+}
+
+typedef void (*t_Remove)(void*, int32_t, int32_t, void*, void*);
+static t_Remove o_Remove = nullptr;
+
+void h_Remove(void* self, int32_t itemId, int32_t amount, void* source, void* mi) {
+    T_COUNT(Remove);
+    if (g_shop) return;
+    if (o_Remove) o_Remove(self, itemId, amount, source, mi);
 }
 
 // ═══════════════════════════════════════════════════════════
 //  7. REMOVE ADS
-//  GamestotySpace.GamestotyAds.DontShowAdsByPlacement(string placement)
-//  private static, 1 param, bool — hook -> true (chặn tất cả vị trí QC)
+//  GamestotyAds.DontShowAdsByPlacement(string) static 1 param → true (chặn QC ngầm)
+//  GamestotyModel.ShowRewardedVideo(AdPlacement, Action<bool>) instance 2 params
+//  → invoke callback(true) khi g_noads (auto nhận thưởng QC)
 // ═══════════════════════════════════════════════════════════
 typedef bool (*t_DontShowAds)(void*, void*);
 static t_DontShowAds o_DontShowAds = nullptr;
@@ -265,23 +272,47 @@ bool h_DontShowAds(void* placement, void* mi) {
     return o_DontShowAds ? o_DontShowAds(placement, mi) : false;
 }
 
-// ═══════════════════════════════════════════════════════════
-//  8. DAMAGE MULTIPLIER
-//  WesternBreaker.GatheringToolModel.get_GlobalDamageMultiplier() instance 0 params
-//  WesternBreaker.Gun.get_GlobalDamageMultiplier()                instance 0 params
-// ═══════════════════════════════════════════════════════════
-typedef float (*t_getDmg)(void*, void*);
-static t_getDmg o_GTM_getDmg = nullptr;
-static t_getDmg o_Gun_getDmg = nullptr;
+typedef void (*t_ShowRewardedVideo)(void*, int32_t, void*, void*);
+static t_ShowRewardedVideo o_ShowRewardedVideo = nullptr;
 
-float h_GTM_getDmg(void* self, void* mi) {
-    T_COUNT(GTM_getDmg);
-    float base = o_GTM_getDmg ? o_GTM_getDmg(self, mi) : 1.0f;
+void h_ShowRewardedVideo(void* self, int32_t placement, void* callback, void* mi) {
+    T_COUNT(ShowRewardedVideo);
+    if (g_noads) {
+        LOGI("NoAds: ShowRewardedVideo -> auto callback(true)");
+        if (!InvokeBoolCallback(callback, true))
+            LOGE("NoAds: InvokeBoolCallback FAIL");
+        return;
+    }
+    if (o_ShowRewardedVideo) o_ShowRewardedVideo(self, placement, callback, mi);
+}
+
+// ═══════════════════════════════════════════════════════════
+//  8. DAMAGE — real-time per-attack methods
+//  GatheringToolItemSettings.GetCombatDamage() virtual instance 0 params
+//  GatheringToolItemSettings.GetDamage(GatheringDamage) instance 1 param
+//  Gun.GetDamage(GunDamage) instance 1 param
+// ═══════════════════════════════════════════════════════════
+typedef float (*t_GetCombatDmg)(void*, void*);
+static t_GetCombatDmg o_GTM_GetCombatDmg = nullptr;
+
+float h_GTM_GetCombatDmg(void* self, void* mi) {
+    T_COUNT(GTM_GetCombatDmg);
+    float base = o_GTM_GetCombatDmg ? o_GTM_GetCombatDmg(self, mi) : 1.0f;
     return base * g_damage;
 }
-float h_Gun_getDmg(void* self, void* mi) {
-    T_COUNT(Gun_getDmg);
-    float base = o_Gun_getDmg ? o_Gun_getDmg(self, mi) : 1.0f;
+
+typedef float (*t_GetDmgEnum)(void*, int32_t, void*);
+static t_GetDmgEnum o_GTM_GetDamage = nullptr;
+static t_GetDmgEnum o_Gun_GetDamage = nullptr;
+
+float h_GTM_GetDamage(void* self, int32_t damageType, void* mi) {
+    T_COUNT(GTM_GetDamage);
+    float base = o_GTM_GetDamage ? o_GTM_GetDamage(self, damageType, mi) : 1.0f;
+    return base * g_damage;
+}
+float h_Gun_GetDamage(void* self, int32_t damageType, void* mi) {
+    T_COUNT(Gun_GetDamage);
+    float base = o_Gun_GetDamage ? o_Gun_GetDamage(self, damageType, mi) : 1.0f;
     return base * g_damage;
 }
 
@@ -296,34 +327,18 @@ static void ResolveAll() {
     T_HOOK("UnityEngine", "Time", "set_timeScale", 1, setTS);
     if (o_getTS) g_gameScale = o_getTS(nullptr);
 
-    // [1] Free Shop — StoreModel.BuyProduct(string, Action<bool>) instance 2 params
-    T_HOOK("WesternBreaker", "StoreModel", "BuyProduct", 2, BuyProduct);
+    // [1] Free Shop — InventoryModel.HasEnough + Remove (bypass affordability + payment)
+    T_HOOK("WesternBreaker", "InventoryModel", "HasEnough", 2, HasEnough);
+    T_HOOK("WesternBreaker", "InventoryModel", "Remove", 3, Remove);
 
-    // [2] Remove Ads — GamestotyAds.DontShowAdsByPlacement(string) static 1 param
+    // [2] Remove Ads — DontShowAdsByPlacement (chặn QC ngầm) + ShowRewardedVideo (auto nhận thưởng)
     T_HOOK("GamestotySpace", "GamestotyAds", "DontShowAdsByPlacement", 1, DontShowAds);
+    T_HOOK("WesternBreaker", "GamestotyModel", "ShowRewardedVideo", 2, ShowRewardedVideo);
 
-    // [3] Damage — hook cả 2 class chứa get_GlobalDamageMultiplier
-    {
-        void* kGTM = FindClass(OBFUSCATE("WesternBreaker"), OBFUSCATE("GatheringToolModel"));
-        if (kGTM) {
-            void* m = FindMethod(kGTM, OBFUSCATE("get_GlobalDamageMultiplier"), 0);
-            if (m) DoHook(MethodFnPtr(m), (void*)h_GTM_getDmg, (void**)&o_GTM_getDmg,
-                          "GatheringToolModel.get_GlobalDamageMultiplier");
-            else   LOGE("GatheringToolModel.get_GlobalDamageMultiplier(0) NOT FOUND");
-        } else {
-            LOGE("GatheringToolModel class NOT FOUND");
-        }
-
-        void* kGun = FindClass(OBFUSCATE("WesternBreaker"), OBFUSCATE("Gun"));
-        if (kGun) {
-            void* m = FindMethod(kGun, OBFUSCATE("get_GlobalDamageMultiplier"), 0);
-            if (m) DoHook(MethodFnPtr(m), (void*)h_Gun_getDmg, (void**)&o_Gun_getDmg,
-                          "Gun.get_GlobalDamageMultiplier");
-            else   LOGE("Gun.get_GlobalDamageMultiplier(0) NOT FOUND");
-        } else {
-            LOGE("Gun class NOT FOUND");
-        }
-    }
+    // [3] Damage — real-time per-attack: GetCombatDamage + GetDamage(enum)
+    T_HOOK("WesternBreaker", "GatheringToolItemSettings", "GetCombatDamage", 0, GTM_GetCombatDmg);
+    T_HOOK("WesternBreaker", "GatheringToolItemSettings", "GetDamage", 1, GTM_GetDamage);
+    T_HOOK("WesternBreaker", "Gun", "GetDamage", 1, Gun_GetDamage);
 
     TraceReport();
     LOGI("=== Resolve DONE ===");
