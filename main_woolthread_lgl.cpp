@@ -269,10 +269,14 @@ static void ApplySpeed() {
 //      public override void PurchaseProduct(string productId, PurchasingPayload payload)
 //    abstract class Isis.Economy.Purchasing.Services.PurchasingService
 //      protected void HandleTransactionFinished(TransactionInfo transactionInfo) // 0x152A054
-//    class Chiron.Purchasing.TransactionInfo
-//      <ProductId>  // 0x10 (string)
-//      <Quantity>   // 0x28 (int)
-//      <State>      // 0x2C (TransactionState enum: 1=Purchased)
+//    class Chiron.Purchasing.TransactionInfo (6 fields):
+//      <ProductId>     // 0x10 (string)
+//      <TransactionId> // 0x18 (string) ← phải non-null
+//      <Receipt>       // 0x20 (string) ← phải non-null
+//      <Quantity>      // 0x28 (int)
+//      <State>         // 0x2C (TransactionState enum: 1=Purchased)
+//      <Payload>       // 0x30 (string) ← phải non-null
+//  3 trường string null → NullReferenceException → SIGABRT
 // ═══════════════════════════════════════════════════════════
 static void* g_txInfoKlass = nullptr;
 typedef void (*t_HandleTxFinished)(void* self, void* ti, void* mi);
@@ -285,20 +289,26 @@ static t_PurchaseProduct o_PurchaseProduct = nullptr;
 void h_PurchaseProduct(void* self, void* productId, void* payload, void* mi) {
     T_COUNT(PurchaseProduct);
     if (g_shop) {
-        if (il2cpp_object_new && g_txInfoKlass && s_HandleTxFinished) {
+        if (il2cpp_object_new && g_txInfoKlass && s_HandleTxFinished && il2cpp_string_new) {
             void* ti = il2cpp_object_new(g_txInfoKlass);
             if (ti) {
-                // Ghi trực tiếp vào field theo offset từ dump.cs
-                *(void**)((uint8_t*)ti + 0x10) = productId; // ProductId (string managed)
-                *(int*)  ((uint8_t*)ti + 0x28) = 1;          // Quantity = 1
-                *(int*)  ((uint8_t*)ti + 0x2C) = 1;          // State = Purchased
+                // Tất cả 6 field — 3 string NULL trước đây gây NullReferenceException
+                *(void**)((uint8_t*)ti + 0x10) = productId;                        // ProductId
+                *(void**)((uint8_t*)ti + 0x18) = il2cpp_string_new("free_tx");     // TransactionId
+                *(void**)((uint8_t*)ti + 0x20) = il2cpp_string_new("{}");          // Receipt
+                *(int*)  ((uint8_t*)ti + 0x28) = 1;                                // Quantity = 1
+                *(int*)  ((uint8_t*)ti + 0x2C) = 1;                                // State = Purchased
+                *(void**)((uint8_t*)ti + 0x30) = il2cpp_string_new("{}");          // Payload
+                T_STEP("FreeShop: goi HandleTxFinished");
                 s_HandleTxFinished(self, ti, s_HandleTxFinishedMI);
-                LOGI("FreeShop: PurchaseProduct giam -> HandleTransactionFinished gia OK");
+                T_STEP("FreeShop: HandleTxFinished OK");
+                LOGI("FreeShop: PurchaseProduct -> HandleTransactionFinished OK");
                 return;
             }
         } else {
-            LOGE("FreeShop: thieu txInfoKlass=%p HandleTxFin=%p object_new=%p",
-                 g_txInfoKlass, (void*)s_HandleTxFinished, (void*)il2cpp_object_new);
+            LOGE("FreeShop: thieu txInfoKlass=%p HandleTxFin=%p object_new=%p string_new=%p",
+                 g_txInfoKlass, (void*)s_HandleTxFinished,
+                 (void*)il2cpp_object_new, (void*)il2cpp_string_new);
         }
     }
     if (o_PurchaseProduct) o_PurchaseProduct(self, productId, payload, mi);
