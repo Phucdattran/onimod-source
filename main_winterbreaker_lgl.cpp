@@ -272,6 +272,17 @@ bool h_DontShowAds(void* placement, void* mi) {
     return o_DontShowAds ? o_DontShowAds(placement, mi) : false;
 }
 
+// IsRewardedVideoAvailable(AdPlacement) instance 1 param
+// Game gọi cái này trước khi show ad, false -> spinner xoay chờ load
+typedef bool (*t_IsRewardedAvail)(void*, int32_t, void*);
+static t_IsRewardedAvail o_IsRewardedAvail = nullptr;
+
+bool h_IsRewardedAvail(void* self, int32_t placement, void* mi) {
+    T_COUNT(IsRewardedAvail);
+    if (g_noads) return true;
+    return o_IsRewardedAvail ? o_IsRewardedAvail(self, placement, mi) : false;
+}
+
 typedef void (*t_ShowRewardedVideo)(void*, int32_t, void*, void*);
 static t_ShowRewardedVideo o_ShowRewardedVideo = nullptr;
 
@@ -331,8 +342,11 @@ static void ResolveAll() {
     T_HOOK("WesternBreaker", "InventoryModel", "HasEnough", 2, HasEnough);
     T_HOOK("WesternBreaker", "InventoryModel", "Remove", 3, Remove);
 
-    // [2] Remove Ads — DontShowAdsByPlacement (chặn QC ngầm) + ShowRewardedVideo (auto nhận thưởng)
+    // [2] Remove Ads — DontShowAdsByPlacement (chặn QC ngầm)
+    //     IsRewardedVideoAvailable -> true (nút reward bấm được ngay)
+    //     ShowRewardedVideo -> callback(true) (auto nhận thưởng)
     T_HOOK("GamestotySpace", "GamestotyAds", "DontShowAdsByPlacement", 1, DontShowAds);
+    T_HOOK("WesternBreaker", "GamestotyModel", "IsRewardedVideoAvailable", 1, IsRewardedAvail);
     T_HOOK("WesternBreaker", "GamestotyModel", "ShowRewardedVideo", 2, ShowRewardedVideo);
 
     // [3] Damage — real-time per-attack: GetCombatDamage + GetDamage(enum)
