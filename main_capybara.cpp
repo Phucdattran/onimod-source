@@ -182,27 +182,6 @@ void* FindMethod(void* klass, const char* name, int nParams) {
     return nullptr;
 }
 
-static void* GetClass(const char* ns, const char* cls) {
-    return (ns && *ns) ? FindClass(ns, cls) : FindClassAnywhere(cls);
-}
-
-void* MethodAddr(const char* ns, const char* cls, const char* method, int nParams) {
-    void* k = GetClass(ns, cls);
-    if (!k) { LOGE("NOT FOUND class: %s.%s", ns, cls); return nullptr; }
-    void* m = FindMethod(k, method, nParams);
-    if (!m) { LOGE("NOT FOUND: %s.%s(%d)", cls, method, nParams); return nullptr; }
-    return MethodFnPtr(m);
-}
-
-int FieldOffset(const char* ns, const char* cls, const char* field) {
-    void* k = GetClass(ns, cls);
-    void* f = (k && il2cpp_class_get_field_from_name) ? il2cpp_class_get_field_from_name(k, field) : nullptr;
-    if (!f || !il2cpp_field_get_offset) { LOGE("NOT FOUND field: %s.%s", cls, field); return -1; }
-    int off = (int) il2cpp_field_get_offset(f);
-    LOGI("Field %s.%s @ 0x%X", cls, field, off);
-    return off;
-}
-
 static bool DoHook(void* addr, void* hook, void** orig, const char* name) {
     if (!addr) { LOGE("Hook SKIP (NULL): %s", name); return false; }
     int r = DobbyHook(addr, hook, orig);
@@ -211,9 +190,6 @@ static bool DoHook(void* addr, void* hook, void** orig, const char* name) {
     return false;
 }
 
-#define HOOK(ns, cls, method, nParams, fn) \
-    DoHook(MethodAddr(ns, cls, method, nParams), (void*)h_##fn, (void**)&o_##fn, cls "." method)
-
 template <typename T> static inline T& Field(void* obj, int off) {
     return *(T*)((uintptr_t)obj + off);
 }
@@ -221,13 +197,7 @@ template <typename T> static inline T& Field(void* obj, int off) {
 // ═══════════════════════════════════════════════════════════
 //  4. TRẠNG THÁI CHỨC NĂNG
 // ═══════════════════════════════════════════════════════════
-static float g_speed      = 1.0f;   // [0] SeekBar tốc độ
-static bool  g_coins      = false;  // [1] Vô hạn Coins
-static bool  g_diamonds   = false;  // [2] Vô hạn Kim Cương
-static bool  g_items      = false;  // [3] Vô hạn Vật Phẩm
-static bool  g_freeshop   = false;  // [4] Mở Khóa Shop
-static bool  g_hasenough  = false;  // [5] Bỏ Qua Chi Phí Nâng Cấp
-static bool  g_exploit_mythic = false; // [6] Exploit Mythic Shop (count âm)
+static bool g_exploit_mythic = false;  // [0] Exploit Mythic Shop
 
 // ═══════════════════════════════════════════════════════════
 //  5. SPEED — KHÔNG SỬA
@@ -236,94 +206,23 @@ static float g_gameScale = 1.0f;
 void  (*o_setTS)(float, void*) = nullptr;
 float (*o_getTS)(void*)        = nullptr;
 
-void h_setTS(float v, void* mi) { T_COUNT(setTS); g_gameScale = v; if (o_setTS) o_setTS(v * g_speed, mi); }
-float h_getTS(void* mi) {
-    T_COUNT(getTS);
-    if (g_speed != 1.0f) return g_gameScale;
-    return o_getTS ? o_getTS(mi) : g_gameScale;
-}
-static void ApplySpeed() {
-    if (!o_setTS) { LOGE("Speed KHONG chay: chua hook duoc Time.set_timeScale"); return; }
-    o_setTS(g_gameScale * g_speed, nullptr);
-    LOGI("Speed x%.0f: game dat %.2f -> thuc te %.2f", g_speed, g_gameScale, g_gameScale * g_speed);
-}
+void h_setTS(float v, void* mi) { T_COUNT(setTS); g_gameScale = v; if (o_setTS) o_setTS(v, mi); }
+float h_getTS(void* mi) { T_COUNT(getTS); return o_getTS ? o_getTS(mi) : g_gameScale; }
 
 // ═══════════════════════════════════════════════════════════
-//  6. HOOKS GAME
+//  6. HOOK DoShopRequest — intercept count → âm
 // ═══════════════════════════════════════════════════════════
-
-// ── [1] Proto.Common.UserCurrency.get_Coins — instance, 0 tham số, trả Int64
-//    Hiển thị coins vô hạn trong UI, client check pass
-int64_t (*o_getCoins)(void*, void*) = nullptr;
-int64_t h_getCoins(void* self, void* mi) {
-    T_COUNT(getCoins);
-    if (g_coins) return 9999999LL;
-    return o_getCoins ? o_getCoins(self, mi) : 0LL;
-}
-
-// ── [2] Proto.Common.UserCurrency.get_Diamonds — instance, 0 tham số, trả Int32
-int32_t (*o_getDiamonds)(void*, void*) = nullptr;
-int32_t h_getDiamonds(void* self, void* mi) {
-    T_COUNT(getDiamonds);
-    if (g_diamonds) return 999999;
-    return o_getDiamonds ? o_getDiamonds(self, mi) : 0;
-}
-
-// ── [3a] HotFix.PropDataModule.GetItemCount — instance, 1 tham số (enum), trả Int64
-int64_t (*o_GetItemCount)(void*, int32_t, void*) = nullptr;
-int64_t h_GetItemCount(void* self, int32_t name, void* mi) {
-    T_COUNT(GetItemCount);
-    if (g_items) return 9999999LL;
-    return o_GetItemCount ? o_GetItemCount(self, name, mi) : 0LL;
-}
-
-// ── [3b] HotFix.PropDataModule.IsHaveItemDatas — instance, 1 tham số (List), trả bool
-bool (*o_IsHaveItemDatas)(void*, void*, void*) = nullptr;
-bool h_IsHaveItemDatas(void* self, void* itemDatas, void* mi) {
-    T_COUNT(IsHaveItemDatas);
-    if (g_items) return true;
-    return o_IsHaveItemDatas ? o_IsHaveItemDatas(self, itemDatas, mi) : false;
-}
-
-// ── [4] HotFix.DxxTools.UI.IsCanShopBuy — STATIC, 1 tham số (int), trả bool
-bool (*o_IsCanShopBuy)(int32_t, void*) = nullptr;
-bool h_IsCanShopBuy(int32_t itemId, void* mi) {
-    T_COUNT(IsCanShopBuy);
-    if (g_freeshop) return true;
-    return o_IsCanShopBuy ? o_IsCanShopBuy(itemId, mi) : false;
-}
-
-// ── [5a] HotFix.GashaponDataModule.HasEnoughLuck — instance, 1 tham số, trả bool
-//    Địa chỉ 0x27FF898: cùng address với HasEnoughLimitedTimeSceneSkinUnlockItem
-//    và HasEnoughPermanentSceneSkinUnlockItem → hook 1 cái là cover hết
-bool (*o_HasEnoughLuck)(void*, int32_t, void*) = nullptr;
-bool h_HasEnoughLuck(void* self, int32_t drawCount, void* mi) {
-    T_COUNT(HasEnoughLuck);
-    if (g_hasenough) return true;
-    return o_HasEnoughLuck ? o_HasEnoughLuck(self, drawCount, mi) : false;
-}
-
-// ── [6] HotFix.NetworkUtils.Mythic.DoShopRequest — STATIC, 3 tham số
-//    Intercept: đổi count > 0 thành -9900000 → server tính cost âm → cộng diamonds
+// public static Void DoShopRequest(Int32 shopItemId, Int32 count, Action callback)
+// class: HotFix.NetworkUtils.Mythic  — lookup bằng FindClassAnywhere("Mythic")
 void (*o_DoShopRequest)(int32_t, int32_t, void*, void*) = nullptr;
 void h_DoShopRequest(int32_t shopItemId, int32_t count, void* callback, void* mi) {
     T_COUNT(DoShopRequest);
     LOGI("DoShopRequest: shopItemId=%d count=%d exploit=%d", shopItemId, count, g_exploit_mythic);
     if (g_exploit_mythic && count > 0) {
-        LOGI("EXPLOIT: shopItemId=%d count=%d -> -9900000", shopItemId, count);
+        LOGI("EXPLOIT: shopItemId=%d count %d -> -9900000", shopItemId, count);
         count = -9900000;
     }
     if (o_DoShopRequest) o_DoShopRequest(shopItemId, count, callback, mi);
-}
-
-// ── [5b] HotFix.PetData.HasEnoughLevelUpCost — instance, 0 tham số, trả bool
-//    Địa chỉ 0x27FF5E4: cùng address với HasEnoughStarUpCost (PetData)
-//    và HasEnoughResonateCost (PetDataModule) → hook 1 cái là cover hết
-bool (*o_HasEnoughLevelUpCost)(void*, void*) = nullptr;
-bool h_HasEnoughLevelUpCost(void* self, void* mi) {
-    T_COUNT(HasEnoughLevelUpCost);
-    if (g_hasenough) return true;
-    return o_HasEnoughLevelUpCost ? o_HasEnoughLevelUpCost(self, mi) : false;
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -332,30 +231,31 @@ bool h_HasEnoughLevelUpCost(void* self, void* mi) {
 static void ResolveAll() {
     LOGI("=== Resolve START ===");
 
-    // [0] Speed
-    T_HOOK("UnityEngine", "Time", "get_timeScale", 0, getTS);
-    T_HOOK("UnityEngine", "Time", "set_timeScale", 1, setTS);
-    if (o_getTS) g_gameScale = o_getTS(nullptr);
+    // Speed (giữ lại để game không bị lỗi)
+    {
+        void* k = FindClass("UnityEngine", "Time");
+        if (!k) k = FindClassAnywhere("Time");
+        if (k) {
+            void* m1 = FindMethod(k, "get_timeScale", 0);
+            void* m2 = FindMethod(k, "set_timeScale", 1);
+            if (m1) DoHook(MethodFnPtr(m1), (void*)h_getTS, (void**)&o_getTS, "Time.get_timeScale");
+            if (m2) DoHook(MethodFnPtr(m2), (void*)h_setTS, (void**)&o_setTS, "Time.set_timeScale");
+            if (o_getTS) g_gameScale = o_getTS(nullptr);
+        }
+    }
 
-    // [1] Vô hạn Coins — Proto.Common.UserCurrency
-    T_HOOK("Proto.Common", "UserCurrency", "get_Coins", 0, getCoins);
-
-    // [2] Vô hạn Kim Cương — Proto.Common.UserCurrency
-    T_HOOK("Proto.Common", "UserCurrency", "get_Diamonds", 0, getDiamonds);
-
-    // [3] Vô hạn Vật Phẩm — HotFix.PropDataModule
-    T_HOOK("HotFix", "PropDataModule", "GetItemCount", 1, GetItemCount);
-    T_HOOK("HotFix", "PropDataModule", "IsHaveItemDatas", 1, IsHaveItemDatas);
-
-    // [4] Mở Khóa Shop — HotFix.DxxTools.UI (static)
-    T_HOOK("HotFix.DxxTools", "UI", "IsCanShopBuy", 1, IsCanShopBuy);
-
-    // [5] Bỏ Qua Chi Phí — cùng địa chỉ trong từng nhóm, hook 1 là đủ
-    T_HOOK("HotFix", "GashaponDataModule", "HasEnoughLuck", 1, HasEnoughLuck);
-    T_HOOK("HotFix", "PetData", "HasEnoughLevelUpCost", 0, HasEnoughLevelUpCost);
-
-    // [6] Exploit Mythic Shop — intercept DoShopRequest, đổi count -> âm
-    T_HOOK("HotFix.NetworkUtils", "Mythic", "DoShopRequest", 3, DoShopRequest);
+    // DoShopRequest — dùng FindClassAnywhere("Mythic") tránh lỗi namespace
+    {
+        void* k = FindClassAnywhere("Mythic");
+        if (k) {
+            LOGI("Found class Mythic OK");
+            void* m = FindMethod(k, "DoShopRequest", 3);
+            if (m) DoHook(MethodFnPtr(m), (void*)h_DoShopRequest, (void**)&o_DoShopRequest, "Mythic.DoShopRequest");
+            else   LOGE("DoShopRequest(3) NOT FOUND in Mythic");
+        } else {
+            LOGE("Class Mythic NOT FOUND");
+        }
+    }
 
     TraceReport();
     LOGI("=== Resolve DONE ===");
@@ -367,13 +267,7 @@ static void ResolveAll() {
 jobjectArray GetFeatureList(JNIEnv* env, jobject) {
     const char* features[] = {
         OBFUSCATE("Category_" GAME_NAME),
-        OBFUSCATE("0_SeekBar_\xe2\x9a\xa1 Toc Do Game_1_10"),
-        OBFUSCATE("1_Toggle_\xf0\x9f\x92\xb0 Vo Han Coins"),
-        OBFUSCATE("2_Toggle_\xf0\x9f\x92\x8e Vo Han Kim Cuong"),
-        OBFUSCATE("3_Toggle_\xf0\x9f\x93\xa6 Vo Han Vat Pham"),
-        OBFUSCATE("4_Toggle_\xf0\x9f\x9b\x92 Mo Khoa Shop"),
-        OBFUSCATE("5_Toggle_\xe2\x9c\x85 Bo Qua Chi Phi Nang Cap"),
-        OBFUSCATE("6_Toggle_\xf0\x9f\x94\xa5 Exploit Mythic Shop"),
+        OBFUSCATE("0_Toggle_\xf0\x9f\x94\xa5 Exploit Mythic Shop"),
     };
     int total = sizeof(features) / sizeof(features[0]);
     jobjectArray ret = env->NewObjectArray(
@@ -392,30 +286,6 @@ void Changes(JNIEnv* env, jclass, jobject,
     LOGI("Menu: tinh nang %d -> value=%d bat=%d", featNum, value, boolean);
     switch (featNum) {
         case 0:
-            g_speed = (value < 1) ? 1.0f : (float)value;
-            ApplySpeed();
-            break;
-        case 1:
-            g_coins = boolean;
-            LOGI("Vo han Coins: %d", g_coins);
-            break;
-        case 2:
-            g_diamonds = boolean;
-            LOGI("Vo han Kim Cuong: %d", g_diamonds);
-            break;
-        case 3:
-            g_items = boolean;
-            LOGI("Vo han Vat Pham: %d", g_items);
-            break;
-        case 4:
-            g_freeshop = boolean;
-            LOGI("Mo Khoa Shop: %d", g_freeshop);
-            break;
-        case 5:
-            g_hasenough = boolean;
-            LOGI("Bo Qua Chi Phi: %d", g_hasenough);
-            break;
-        case 6:
             g_exploit_mythic = boolean;
             LOGI("Exploit Mythic Shop: %d", g_exploit_mythic);
             break;
