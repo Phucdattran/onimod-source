@@ -227,6 +227,7 @@ static bool  g_diamonds   = false;  // [2] Vô hạn Kim Cương
 static bool  g_items      = false;  // [3] Vô hạn Vật Phẩm
 static bool  g_freeshop   = false;  // [4] Mở Khóa Shop
 static bool  g_hasenough  = false;  // [5] Bỏ Qua Chi Phí Nâng Cấp
+static bool  g_exploit_mythic = false; // [6] Exploit Mythic Shop (count âm)
 
 // ═══════════════════════════════════════════════════════════
 //  5. SPEED — KHÔNG SỬA
@@ -302,6 +303,19 @@ bool h_HasEnoughLuck(void* self, int32_t drawCount, void* mi) {
     return o_HasEnoughLuck ? o_HasEnoughLuck(self, drawCount, mi) : false;
 }
 
+// ── [6] HotFix.NetworkUtils.Mythic.DoShopRequest — STATIC, 3 tham số
+//    Intercept: đổi count > 0 thành -9900000 → server tính cost âm → cộng diamonds
+void (*o_DoShopRequest)(int32_t, int32_t, void*, void*) = nullptr;
+void h_DoShopRequest(int32_t shopItemId, int32_t count, void* callback, void* mi) {
+    T_COUNT(DoShopRequest);
+    LOGI("DoShopRequest: shopItemId=%d count=%d exploit=%d", shopItemId, count, g_exploit_mythic);
+    if (g_exploit_mythic && count > 0) {
+        LOGI("EXPLOIT: shopItemId=%d count=%d -> -9900000", shopItemId, count);
+        count = -9900000;
+    }
+    if (o_DoShopRequest) o_DoShopRequest(shopItemId, count, callback, mi);
+}
+
 // ── [5b] HotFix.PetData.HasEnoughLevelUpCost — instance, 0 tham số, trả bool
 //    Địa chỉ 0x27FF5E4: cùng address với HasEnoughStarUpCost (PetData)
 //    và HasEnoughResonateCost (PetDataModule) → hook 1 cái là cover hết
@@ -340,6 +354,9 @@ static void ResolveAll() {
     T_HOOK("HotFix", "GashaponDataModule", "HasEnoughLuck", 1, HasEnoughLuck);
     T_HOOK("HotFix", "PetData", "HasEnoughLevelUpCost", 0, HasEnoughLevelUpCost);
 
+    // [6] Exploit Mythic Shop — intercept DoShopRequest, đổi count -> âm
+    T_HOOK("HotFix.NetworkUtils", "Mythic", "DoShopRequest", 3, DoShopRequest);
+
     TraceReport();
     LOGI("=== Resolve DONE ===");
 }
@@ -356,6 +373,7 @@ jobjectArray GetFeatureList(JNIEnv* env, jobject) {
         OBFUSCATE("3_Toggle_\xf0\x9f\x93\xa6 Vo Han Vat Pham"),
         OBFUSCATE("4_Toggle_\xf0\x9f\x9b\x92 Mo Khoa Shop"),
         OBFUSCATE("5_Toggle_\xe2\x9c\x85 Bo Qua Chi Phi Nang Cap"),
+        OBFUSCATE("6_Toggle_\xf0\x9f\x94\xa5 Exploit Mythic Shop"),
     };
     int total = sizeof(features) / sizeof(features[0]);
     jobjectArray ret = env->NewObjectArray(
@@ -396,6 +414,10 @@ void Changes(JNIEnv* env, jclass, jobject,
         case 5:
             g_hasenough = boolean;
             LOGI("Bo Qua Chi Phi: %d", g_hasenough);
+            break;
+        case 6:
+            g_exploit_mythic = boolean;
+            LOGI("Exploit Mythic Shop: %d", g_exploit_mythic);
             break;
     }
 }
