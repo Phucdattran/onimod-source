@@ -250,11 +250,11 @@ static void ApplySpeed() {
 //  Flow: ShopIAPCurrencyWidget::OnPurchaseButtonClick
 //    -> IapItemsService::OnRequestPurchaseItem(EventRequestPurchaseIapItem)
 //    -> IapSayManager::BuyProductID(productInfo, succeedAction, failedAction)
-//       succeedAction = closure da capture (eco, reward) tu OnRequestPurchaseItem
+//       succeedAction = closure đã capture (eco, reward) từ OnRequestPurchaseItem
 //    -> [Google Play] -> ConfirmValidatedPurchase -> ProcessPurchaseOnValidationSucceeded
 //    -> IapItemsService::ApplyGrantedPurchase(eco, reward)
 //
-//  Hook: chan BuyProductID, goi truc tiep succeedAction delegate (bo Google Play).
+//  Hook: chặn BuyProductID, gọi trực tiếp succeedAction delegate (bỏ Google Play).
 //  Delegate IL2CPP: target @ 0x10, methodInfo* @ 0x18, code = methodInfo[0]
 // ═══════════════════════════════════════════════════════════
 typedef void (*t_BuyProductID)(void* self, void* productInfo, void* succeedAction, void* failedAction, void* mi);
@@ -263,34 +263,67 @@ static t_BuyProductID o_BuyProductID = nullptr;
 void h_BuyProductID(void* self, void* productInfo, void* succeedAction, void* failedAction, void* mi) {
     T_COUNT(BuyProductID);
     if (g_freeShop && succeedAction) {
-        void* target      = Field<void*>(succeedAction, 0x10);
-        void** methodInfo = Field<void**>(succeedAction, 0x18);
-        if (methodInfo && methodInfo[0]) {
+        // IL2CPP delegate layout (arm64):
+        //   0x10 = target   (closure context / captured vars)
+        //   0x18 = method_ptr  <<< CON TRỎ CODE TRỰC TIẾP, không phải MethodInfo*
+        //   0x28 = MethodInfo*
+        void* target     = Field<void*>(succeedAction, 0x10);
+        void* methodPtr  = Field<void*>(succeedAction, 0x18);
+        void* methodInfo = Field<void*>(succeedAction, 0x28);
+        if (methodPtr) {
             typedef void (*ClosureFn)(void* target, void* product, void* mi);
-            ClosureFn fn = (ClosureFn) methodInfo[0];
-            LOGI("FreeShop: goi succeedAction(null product)");
-            fn(target, nullptr, (void*)methodInfo);
-            LOGI("FreeShop: xong, items da cap");
+            ClosureFn fn = (ClosureFn)methodPtr;
+            LOGI("FreeShop: goi succeedAction target=%p ptr=%p", target, methodPtr);
+            fn(target, nullptr, methodInfo);  // product=null -> h_ConfirmValidatedPurchase bat
+            LOGI("FreeShop: succeedAction xong");
         } else {
-            LOGE("FreeShop: succeedAction khong hop le (null methodInfo)");
+            LOGE("FreeShop: methodPtr NULL @ 0x18");
         }
         return;
     }
     if (o_BuyProductID) o_BuyProductID(self, productInfo, succeedAction, failedAction, mi);
 }
 
+// ConfirmValidatedPurchase(SKPurchasedProduct, RewardArray, Action<SKPurchasedProduct>, Action) = 4 params
+// Khi Free Shop: product=null (từ h_BuyProductID), bypass server validation,
+// gọi innerSucceed trực tiếp — đây là closure (p) => ApplyGrantedPurchase(eco, reward), p KHÔNG dùng
+typedef void (*t_ConfirmValidatedPurchase)(void* self, void* product, void* reward, void* innerSucceed, void* innerFail, void* mi);
+static t_ConfirmValidatedPurchase o_ConfirmValidatedPurchase = nullptr;
+
+void h_ConfirmValidatedPurchase(void* self, void* product, void* reward, void* innerSucceed, void* innerFail, void* mi) {
+    T_COUNT(ConfirmValidatedPurchase);
+    if (g_freeShop && !product && innerSucceed) {
+        void* target   = Field<void*>(innerSucceed, 0x10);
+        void* method   = Field<void*>(innerSucceed, 0x18);
+        void* innerMi  = Field<void*>(innerSucceed, 0x28);
+        if (method) {
+            typedef void (*InnerFn)(void* target, void* product, void* mi);
+            LOGI("FreeShop: ConfirmValidatedPurchase bypass -> ApplyGrantedPurchase");
+            ((InnerFn)method)(target, nullptr, innerMi);
+            LOGI("FreeShop: grant xong!");
+        } else {
+            LOGE("FreeShop: innerSucceed.method_ptr NULL");
+        }
+        return;
+    }
+    if (o_ConfirmValidatedPurchase) o_ConfirmValidatedPurchase(self, product, reward, innerSucceed, innerFail, mi);
+}
+
 // ═══════════════════════════════════════════════════════════
-//  7. GAN HOOK
+//  7. GẮN HOOK
 // ═══════════════════════════════════════════════════════════
 static void ResolveAll() {
     LOGI("=== Resolve START ===");
 
+    // [0] Speed
     T_HOOK("UnityEngine", "Time", "get_timeScale", 0, getTS);
     T_HOOK("UnityEngine", "Time", "set_timeScale", 1, setTS);
     if (o_getTS) g_gameScale = o_getTS(nullptr);
 
-    // BuyProductID(SKProductInfo, Action<SKPurchasedProduct>, Action) = 3 params
+    // [1] Free Shop
     T_HOOK("Source.Shop", "IapSayManager", "BuyProductID", 3, BuyProductID);
+    // ConfirmValidatedPurchase(SKPurchasedProduct, RewardArray, Action<SKPurchasedProduct>, Action) = 4 params
+    T_HOOK("Source.Shop", "IapSayManager", "ConfirmValidatedPurchase", 4, ConfirmValidatedPurchase);
 
     TraceReport();
     LOGI("=== Resolve DONE ===");
@@ -321,11 +354,11 @@ void Changes(JNIEnv* env, jclass, jobject,
     T_STEP("bam tinh nang so %d (value=%d, bat=%d)", featNum, value, boolean);
     LOGI("Menu: tinh nang %d -> value=%d bat=%d", featNum, value, boolean);
     switch (featNum) {
-        case 0:
+        case 0: // Speed
             g_speed = (value < 1) ? 1.0f : (float) value;
             ApplySpeed();
             break;
-        case 1:
+        case 1: // Free Shop
             g_freeShop = boolean;
             LOGI("FreeShop: %s", g_freeShop ? "BAT" : "TAT");
             break;
@@ -333,7 +366,7 @@ void Changes(JNIEnv* env, jclass, jobject,
 }
 
 // ═══════════════════════════════════════════════════════════
-//  9. KHOI TAO — KHONG SUA
+//  9. KHỞI TẠO — KHÔNG SỬA
 // ═══════════════════════════════════════════════════════════
 static volatile bool g_il2cpp_ready = false;
 static int (*o_il2cpp_init)(const char*) = nullptr;
