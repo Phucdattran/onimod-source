@@ -255,7 +255,7 @@ static void ApplySpeed() {
 //    -> IapItemsService::ApplyGrantedPurchase(eco, reward)
 //
 //  Hook: chặn BuyProductID, gọi trực tiếp succeedAction delegate (bỏ Google Play).
-//  Delegate IL2CPP: target @ 0x10, methodInfo* @ 0x18, code = methodInfo[0]
+//  Delegate IL2CPP (Unity 2020+): 0x10=method_ptr, 0x18=invoke_impl, 0x20=target, 0x28=MethodInfo*
 // ═══════════════════════════════════════════════════════════
 typedef void (*t_BuyProductID)(void* self, void* productInfo, void* succeedAction, void* failedAction, void* mi);
 static t_BuyProductID o_BuyProductID = nullptr;
@@ -263,12 +263,13 @@ static t_BuyProductID o_BuyProductID = nullptr;
 void h_BuyProductID(void* self, void* productInfo, void* succeedAction, void* failedAction, void* mi) {
     T_COUNT(BuyProductID);
     if (g_freeShop && succeedAction) {
-        // IL2CPP delegate layout (arm64):
-        //   0x10 = target   (closure context / captured vars)
-        //   0x18 = method_ptr  <<< CON TRỎ CODE TRỰC TIẾP, không phải MethodInfo*
+        // IL2CPP delegate layout (Unity 2020+, arm64):
+        //   0x10 = method_ptr  (code pointer trực tiếp)
+        //   0x18 = invoke_impl (trampoline, thường == method_ptr)
+        //   0x20 = target      (closure object / captured vars)
         //   0x28 = MethodInfo*
-        void* target     = Field<void*>(succeedAction, 0x10);
-        void* methodPtr  = Field<void*>(succeedAction, 0x18);
+        void* methodPtr  = Field<void*>(succeedAction, 0x10);
+        void* target     = Field<void*>(succeedAction, 0x20);
         void* methodInfo = Field<void*>(succeedAction, 0x28);
         if (methodPtr) {
             typedef void (*ClosureFn)(void* target, void* product, void* mi);
@@ -277,7 +278,7 @@ void h_BuyProductID(void* self, void* productInfo, void* succeedAction, void* fa
             fn(target, nullptr, methodInfo);  // product=null -> h_ConfirmValidatedPurchase bat
             LOGI("FreeShop: succeedAction xong");
         } else {
-            LOGE("FreeShop: methodPtr NULL @ 0x18");
+            LOGE("FreeShop: methodPtr NULL @ 0x10");
         }
         return;
     }
@@ -293,8 +294,8 @@ static t_ConfirmValidatedPurchase o_ConfirmValidatedPurchase = nullptr;
 void h_ConfirmValidatedPurchase(void* self, void* product, void* reward, void* innerSucceed, void* innerFail, void* mi) {
     T_COUNT(ConfirmValidatedPurchase);
     if (g_freeShop && !product && innerSucceed) {
-        void* target   = Field<void*>(innerSucceed, 0x10);
-        void* method   = Field<void*>(innerSucceed, 0x18);
+        void* method   = Field<void*>(innerSucceed, 0x10);
+        void* target   = Field<void*>(innerSucceed, 0x20);
         void* innerMi  = Field<void*>(innerSucceed, 0x28);
         if (method) {
             typedef void (*InnerFn)(void* target, void* product, void* mi);
