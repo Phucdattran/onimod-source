@@ -247,14 +247,10 @@ static void ApplySpeed() {
 // ═══════════════════════════════════════════════════════════
 //  6. FREE SHOP
 //
-//  Flow: ShopIAPCurrencyWidget::OnPurchaseButtonClick
-//    -> IapItemsService::OnRequestPurchaseItem(EventRequestPurchaseIapItem)
-//    -> IapSayManager::BuyProductID(productInfo, succeedAction, failedAction)
-//       succeedAction = closure đã capture (eco, reward) từ OnRequestPurchaseItem
-//    -> [Google Play] -> ConfirmValidatedPurchase -> ProcessPurchaseOnValidationSucceeded
-//    -> IapItemsService::ApplyGrantedPurchase(eco, reward)
-//
-//  Hook: chặn BuyProductID, gọi trực tiếp succeedAction delegate (bỏ Google Play).
+//  Flow: BuyProductID(productInfo, succeedAction, failedAction)
+//    succeedAction la closure UI callback: (product) => { if (!product) return; ConfirmValidatedPurchase(...) }
+//    FIX: truyen productInfo lam fake product (non-null) de vuot null-check
+//    h_ConfirmValidatedPurchase bat -> goi innerSucceed -> ApplyGrantedPurchase
 //  Delegate IL2CPP (Unity 2020+): 0x10=method_ptr, 0x18=invoke_impl, 0x20=target, 0x28=MethodInfo*
 // ═══════════════════════════════════════════════════════════
 typedef void (*t_BuyProductID)(void* self, void* productInfo, void* succeedAction, void* failedAction, void* mi);
@@ -265,7 +261,6 @@ void h_BuyProductID(void* self, void* productInfo, void* succeedAction, void* fa
     if (g_freeShop && succeedAction) {
         // IL2CPP delegate layout (Unity 2020+, arm64):
         //   0x10 = method_ptr  (code pointer trực tiếp)
-        //   0x18 = invoke_impl (trampoline, thường == method_ptr)
         //   0x20 = target      (closure object / captured vars)
         //   0x28 = MethodInfo*
         void* methodPtr  = Field<void*>(succeedAction, 0x10);
@@ -274,8 +269,10 @@ void h_BuyProductID(void* self, void* productInfo, void* succeedAction, void* fa
         if (methodPtr) {
             typedef void (*ClosureFn)(void* target, void* product, void* mi);
             ClosureFn fn = (ClosureFn)methodPtr;
-            LOGI("FreeShop: goi succeedAction target=%p ptr=%p", target, methodPtr);
-            fn(target, nullptr, methodInfo);  // product=null -> h_ConfirmValidatedPurchase bat
+            // Truyen productInfo lam fake product (non-null) de vuot null-check trong succeedAction
+            // succeedAction se goi ConfirmValidatedPurchase -> h_ConfirmValidatedPurchase bat
+            LOGI("FreeShop: goi succeedAction target=%p ptr=%p product=%p", target, methodPtr, productInfo);
+            fn(target, productInfo, methodInfo);
             LOGI("FreeShop: succeedAction xong");
         } else {
             LOGE("FreeShop: methodPtr NULL @ 0x10");
@@ -286,20 +283,20 @@ void h_BuyProductID(void* self, void* productInfo, void* succeedAction, void* fa
 }
 
 // ConfirmValidatedPurchase(SKPurchasedProduct, RewardArray, Action<SKPurchasedProduct>, Action) = 4 params
-// Khi Free Shop: product=null (từ h_BuyProductID), bypass server validation,
-// gọi innerSucceed trực tiếp — đây là closure (p) => ApplyGrantedPurchase(eco, reward), p KHÔNG dùng
+// Free Shop: succeedAction truyen productInfo (gia) lam product -> qua null-check -> vao day
+// Bo !product check: bat ca product that lan gia
 typedef void (*t_ConfirmValidatedPurchase)(void* self, void* product, void* reward, void* innerSucceed, void* innerFail, void* mi);
 static t_ConfirmValidatedPurchase o_ConfirmValidatedPurchase = nullptr;
 
 void h_ConfirmValidatedPurchase(void* self, void* product, void* reward, void* innerSucceed, void* innerFail, void* mi) {
     T_COUNT(ConfirmValidatedPurchase);
-    if (g_freeShop && !product && innerSucceed) {
+    if (g_freeShop && innerSucceed) {   // bo !product: bat ca khi product that lan gia (productInfo)
         void* method   = Field<void*>(innerSucceed, 0x10);
         void* target   = Field<void*>(innerSucceed, 0x20);
         void* innerMi  = Field<void*>(innerSucceed, 0x28);
         if (method) {
             typedef void (*InnerFn)(void* target, void* product, void* mi);
-            LOGI("FreeShop: ConfirmValidatedPurchase bypass -> ApplyGrantedPurchase");
+            LOGI("FreeShop: ConfirmValidatedPurchase bypass product=%p reward=%p", product, reward);
             ((InnerFn)method)(target, nullptr, innerMi);
             LOGI("FreeShop: grant xong!");
         } else {
@@ -323,7 +320,6 @@ static void ResolveAll() {
 
     // [1] Free Shop
     T_HOOK("Source.Shop", "IapSayManager", "BuyProductID", 3, BuyProductID);
-    // ConfirmValidatedPurchase(SKPurchasedProduct, RewardArray, Action<SKPurchasedProduct>, Action) = 4 params
     T_HOOK("Source.Shop", "IapSayManager", "ConfirmValidatedPurchase", 4, ConfirmValidatedPurchase);
 
     TraceReport();
