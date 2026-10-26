@@ -205,8 +205,7 @@ static bool DoHook(void* addr, void* hook, void** orig, const char* name) {
     if (r == 0) { LOGI("Hook OK: %s @ %p", name, addr); return true; }
     LOGE("Hook FAIL(%d): %s @ %p", r, name, addr); return false;
 }
-#define T_HOOK(ns, cls, method, nParams, fn) \
-    DoHook(MethodAddr(ns, cls, method, nParams), (void*)h_##fn, (void**)&o_##fn, cls "." method)
+// T_HOOK từ LGLTrace.h — dùng trực tiếp (không redefine để TraceReport() đếm đúng)
 
 // ═══════════════════════════════════════════════════════════
 //  4. TRẠNG THÁI CHỨC NĂNG
