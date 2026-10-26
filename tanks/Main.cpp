@@ -47,6 +47,7 @@ uint32_t    (*il2cpp_method_get_param_count)(void*)                        = nul
 void*       (*il2cpp_class_get_field_from_name)(void*, const char*)        = nullptr;
 size_t      (*il2cpp_field_get_offset)(void*)                              = nullptr;
 void*       (*il2cpp_string_new)(const char*)                              = nullptr;
+void*       (*il2cpp_object_new)(void* klass)                              = nullptr;
 
 // ═══════════════════════════════════════════════════════════
 //  2. ELF SYMBOL + IL2CPP LOADER — KHÔNG SỬA
@@ -113,6 +114,7 @@ bool InitIL2CppAPI() {
     LOAD(il2cpp_class_get_field_from_name);
     LOAD(il2cpp_field_get_offset);
     LOAD(il2cpp_string_new);
+    LOAD(il2cpp_object_new);
     #undef LOAD
     bool ok = il2cpp_domain_get && il2cpp_domain_get_assemblies && il2cpp_assembly_get_image &&
               il2cpp_class_from_name && il2cpp_class_get_methods && il2cpp_method_get_name;
@@ -222,8 +224,9 @@ template <typename T> static inline T& Field(void* obj, int off) {
 // ═══════════════════════════════════════════════════════════
 //  4. TRẠNG THÁI
 // ═══════════════════════════════════════════════════════════
-static float g_speed     = 1.0f;   // [0] Speed
-static bool  g_freeShop  = false;  // [1] Free Shop
+static float g_speed             = 1.0f;   // [0] Speed
+static bool  g_freeShop          = false;  // [1] Free Shop
+static void* g_skPurchasedKlass  = nullptr; // SKPurchasedProduct IL2CPP klass
 
 // ═══════════════════════════════════════════════════════════
 //  5. SPEED
@@ -247,11 +250,16 @@ static void ApplySpeed() {
 // ═══════════════════════════════════════════════════════════
 //  6. FREE SHOP
 //
-//  Flow: BuyProductID(productInfo, succeedAction, failedAction)
-//    succeedAction la closure UI callback: (product) => { if (!product) return; ConfirmValidatedPurchase(...) }
-//    FIX: truyen productInfo lam fake product (non-null) de vuot null-check
-//    h_ConfirmValidatedPurchase bat -> goi innerSucceed -> ApplyGrantedPurchase
-//  Delegate IL2CPP (Unity 2020+): 0x10=method_ptr, 0x18=invoke_impl, 0x20=target, 0x28=MethodInfo*
+//  Root cause v4: succeedAction có IL2CPP type check `isinst SKPurchasedProduct`.
+//  Truyền productInfo (IapProductInfo) → klass ptr tại 0x00 không khớp → isinst fail
+//  → return sớm → ConfirmValidatedPurchase không được gọi.
+//
+//  Fix v5: il2cpp_object_new(g_skPurchasedKlass) tạo fake SKPurchasedProduct đúng type
+//  → isinst PASS → succeedAction gọi ConfirmValidatedPurchase với reward thật
+//  → h_ConfirmValidatedPurchase hook → gọi innerSucceed → ApplyGrantedPurchase.
+//
+//  IL2CPP delegate layout (Unity 2020+, arm64):
+//    0x10 = method_ptr, 0x18 = invoke_impl, 0x20 = target, 0x28 = MethodInfo*
 // ═══════════════════════════════════════════════════════════
 typedef void (*t_BuyProductID)(void* self, void* productInfo, void* succeedAction, void* failedAction, void* mi);
 static t_BuyProductID o_BuyProductID = nullptr;
@@ -259,20 +267,36 @@ static t_BuyProductID o_BuyProductID = nullptr;
 void h_BuyProductID(void* self, void* productInfo, void* succeedAction, void* failedAction, void* mi) {
     T_COUNT(BuyProductID);
     if (g_freeShop && succeedAction) {
-        // IL2CPP delegate layout (Unity 2020+, arm64):
-        //   0x10 = method_ptr  (code pointer trực tiếp)
-        //   0x20 = target      (closure object / captured vars)
-        //   0x28 = MethodInfo*
         void* methodPtr  = Field<void*>(succeedAction, 0x10);
+        void* invokeImpl = Field<void*>(succeedAction, 0x18);
         void* target     = Field<void*>(succeedAction, 0x20);
         void* methodInfo = Field<void*>(succeedAction, 0x28);
+
+        // Dump target closure (debug: xem reward/innerSucceed ở offset nào)
+        if (target) {
+            LOGI("FreeShop: closure t10=%p t18=%p t20=%p t28=%p t30=%p",
+                Field<void*>(target,0x10), Field<void*>(target,0x18),
+                Field<void*>(target,0x20), Field<void*>(target,0x28),
+                Field<void*>(target,0x30));
+        }
+
+        // Tạo fake SKPurchasedProduct để qua isinst check trong succeedAction
+        void* fakeProduct = nullptr;
+        if (g_skPurchasedKlass && il2cpp_object_new) {
+            fakeProduct = il2cpp_object_new(g_skPurchasedKlass);
+            LOGI("FreeShop: fakeProduct=%p skKlass=%p ptr=%p inv=%p",
+                 fakeProduct, g_skPurchasedKlass, methodPtr, invokeImpl);
+        } else {
+            // fallback: dung productInfo nhung co the fail isinst
+            fakeProduct = productInfo;
+            LOGI("FreeShop: skKlass=NULL fallback productInfo=%p ptr=%p",
+                 productInfo, methodPtr);
+        }
+
         if (methodPtr) {
             typedef void (*ClosureFn)(void* target, void* product, void* mi);
-            ClosureFn fn = (ClosureFn)methodPtr;
-            // Truyen productInfo lam fake product (non-null) de vuot null-check trong succeedAction
-            // succeedAction se goi ConfirmValidatedPurchase -> h_ConfirmValidatedPurchase bat
-            LOGI("FreeShop: goi succeedAction target=%p ptr=%p product=%p", target, methodPtr, productInfo);
-            fn(target, productInfo, methodInfo);
+            LOGI("FreeShop: goi succeedAction target=%p product=%p", target, fakeProduct);
+            ((ClosureFn)methodPtr)(target, fakeProduct, methodInfo);
             LOGI("FreeShop: succeedAction xong");
         } else {
             LOGE("FreeShop: methodPtr NULL @ 0x10");
@@ -320,7 +344,12 @@ static void ResolveAll() {
 
     // [1] Free Shop
     T_HOOK("Source.Shop", "IapSayManager", "BuyProductID", 3, BuyProductID);
+    // ConfirmValidatedPurchase(SKPurchasedProduct, RewardArray, Action<SKPurchasedProduct>, Action) = 4 params
     T_HOOK("Source.Shop", "IapSayManager", "ConfirmValidatedPurchase", 4, ConfirmValidatedPurchase);
+
+    // Cache SKPurchasedProduct klass để il2cpp_object_new tạo fake product đúng type
+    g_skPurchasedKlass = FindClassAnywhere("SKPurchasedProduct");
+    LOGI("SKPurchasedProduct klass: %p", g_skPurchasedKlass);
 
     TraceReport();
     LOGI("=== Resolve DONE ===");
