@@ -21,8 +21,8 @@
 //    6. Free Shop hook đổi kết quả thành Success → item cấp về
 //
 //  Lỗi "你有一笔未完成的订单":
-//    Nếu popup này hiện = _isBuying đang stuck true từ lần mua trước.
-//    Hook get_Buying → false sẽ fix vấn đề này.
+//    Popup này do server Kunpo báo có đơn chưa xong.
+//    FailCondition/CancelCondition → false sẽ vượt qua lỗi này.
 // ============================================================
 
 #define LOG_TAG      "CHAMPIONFORGE_MOD"
@@ -254,24 +254,17 @@ static void ApplySpeed() {
 //
 //  Luồng mua hàng (Kunpo IAP):
 //    BuyProduct → BuyProductRun (coroutine) →
-//      [kiểm tra get_Buying()] → StepMakePurchaseOrder →
-//      StepCallPayment → StepVerification →
+//      StepMakePurchaseOrder → StepCallPayment → StepVerification →
 //      if (FailCondition) → fail / else → FinishPurchaseSuccessOrder
 //
 //  Hook:
-//    get_Buying      → false  (xóa _isBuying stuck → cho phép bắt đầu mua)
 //    FailCondition   → false  (không bao giờ fail)
 //    CancelCondition → false  (không bao giờ cancel)
 //    MapGoogleBuyResult → 0   (Google Pay error code → success)
+//
+//  NOTE: get_Buying() KHÔNG hook — gọi liên tục mỗi frame, Dobby patch
+//        khi Unity đang gọi → race condition → MTE abort (Android 15).
 // ═══════════════════════════════════════════════════════════
-
-// get_Buying() → bool (STATIC, 0 params) @ 0x31CD8E8 UNIQUE
-// Trả về _isBuying static field. Hook → false để xóa trạng thái "đang mua" bị kẹt.
-bool (*o_getBuying)(void*) = nullptr;
-bool h_getBuying(void* mi) {
-    T_COUNT(getBuying);
-    return false;  // luôn "không đang mua" → cho phép bắt đầu purchase mới
-}
 
 // FailCondition(buyProduct) → bool (instance, 1 param)
 // Trả về true nếu purchase thất bại. Hook → false để không bao giờ fail.
@@ -315,8 +308,6 @@ static void ResolveAll() {
     T_HOOK("UnityEngine", "Time", "get_timeScale", 0, getTS);
 
     // [1] Free Shop: Kunpo IAP
-    // get_Buying: static 0 params — fix _isBuying stuck (gây popup "未完成的订单")
-    T_HOOK("Kar98k.IAP.Kunpo", "Kunpo_IAP", "get_Buying",      0, getBuying);
     // FailCondition + CancelCondition: base class, offset UNIQUE
     T_HOOK("Kar98k.IAP.Kunpo", "Kunpo_IAP", "FailCondition",   1, FailCondition);
     T_HOOK("Kar98k.IAP.Kunpo", "Kunpo_IAP", "CancelCondition", 1, CancelCondition);
