@@ -292,6 +292,9 @@ void h_BuyProductID(void* self, void* productInfo, void* succeedAction, void* fa
     if (o_BuyProductID) o_BuyProductID(self, productInfo, succeedAction, failedAction, mi);
 }
 
+// Forward declaration (h_ConfirmValidatedPurchase defined below)
+void h_ConfirmValidatedPurchase(void* self, void* product, void* reward, void* innerSucceed, void* innerFail, void* mi);
+
 // Hook on <BuyProductID>b__0 — intercept the lambda to bypass product validation
 typedef void (*t_SucceedLambda)(void* closure, void* skProduct, void* mi);
 static t_SucceedLambda o_SucceedLambda = nullptr;
