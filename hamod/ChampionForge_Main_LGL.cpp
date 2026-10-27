@@ -7,12 +7,22 @@
 //    [1]  Free Shop  — mua đồ không tốn tiền thật
 //
 //  Free Shop (Kunpo IAP framework):
+//    - get_Buying      (Kar98k.IAP.Kunpo, Kunpo_IAP)  → false: xóa _isBuying stuck
 //    - FailCondition   (Kar98k.IAP.Kunpo, Kunpo_IAP)  → false: không fail
 //    - CancelCondition (Kar98k.IAP.Kunpo, Kunpo_IAP)  → false: không cancel
 //    - MapGoogleBuyResult (IapUnityGoogle)             → 0 (success): đổi mã lỗi Google Pay
 //
-//  Cách dùng Free Shop: bấm Mua trong shop → dialog Google Pay hiện →
-//  bấm Hủy/Back → Free Shop hook đổi kết quả thành Success → item cấp về.
+//  Cách dùng Free Shop:
+//    1. Chờ Toast "LGL Mod: lib XX:XX:XX" hiện lên
+//    2. Đợi thêm 50 giây (mod cần thời gian init)
+//    3. Bật toggle "Free Shop" trong menu LGL
+//    4. Bấm mua item trong shop
+//    5. Dialog Google Pay hiện → bấm Hủy/Back
+//    6. Free Shop hook đổi kết quả thành Success → item cấp về
+//
+//  Lỗi "你有一笔未完成的订单":
+//    Nếu popup này hiện = _isBuying đang stuck true từ lần mua trước.
+//    Hook get_Buying → false sẽ fix vấn đề này.
 // ============================================================
 
 #define LOG_TAG      "CHAMPIONFORGE_MOD"
@@ -244,24 +254,24 @@ static void ApplySpeed() {
 //
 //  Luồng mua hàng (Kunpo IAP):
 //    BuyProduct → BuyProductRun (coroutine) →
-//      StepMakePurchaseOrder → StepCallPayment → StepVerification →
+//      [kiểm tra get_Buying()] → StepMakePurchaseOrder →
+//      StepCallPayment → StepVerification →
 //      if (FailCondition) → fail / else → FinishPurchaseSuccessOrder
 //
 //  Hook:
+//    get_Buying      → false  (xóa _isBuying stuck → cho phép bắt đầu mua)
 //    FailCondition   → false  (không bao giờ fail)
 //    CancelCondition → false  (không bao giờ cancel)
 //    MapGoogleBuyResult → 0   (Google Pay error code → success)
-//
-//  Cách dùng:
-//    1. Bật Free Shop toggle trong menu LGL
-//    2. Bấm mua item trong shop
-//    3. Google Pay dialog hiện → bấm Hủy / Back
-//    4. MapGoogleBuyResult chuyển "cancelled" thành 0 (success)
-//    5. FailCondition + CancelCondition trả false → luồng tiếp tục
-//    6. StepVerification chạy (có thể timeout ~30s)
-//    7. FailCondition sau verification trả false → FinishPurchaseSuccessOrder
-//    8. Item được cấp client-side!
 // ═══════════════════════════════════════════════════════════
+
+// get_Buying() → bool (STATIC, 0 params) @ 0x31CD8E8 UNIQUE
+// Trả về _isBuying static field. Hook → false để xóa trạng thái "đang mua" bị kẹt.
+bool (*o_getBuying)(void*) = nullptr;
+bool h_getBuying(void* mi) {
+    T_COUNT(getBuying);
+    return false;  // luôn "không đang mua" → cho phép bắt đầu purchase mới
+}
 
 // FailCondition(buyProduct) → bool (instance, 1 param)
 // Trả về true nếu purchase thất bại. Hook → false để không bao giờ fail.
@@ -305,8 +315,9 @@ static void ResolveAll() {
     T_HOOK("UnityEngine", "Time", "get_timeScale", 0, getTS);
 
     // [1] Free Shop: Kunpo IAP
-    // FailCondition + CancelCondition: base class (Kar98k.IAP.Kunpo, Kunpo_IAP)
-    // offset UNIQUE — hook được
+    // get_Buying: static 0 params — fix _isBuying stuck (gây popup "未完成的订单")
+    T_HOOK("Kar98k.IAP.Kunpo", "Kunpo_IAP", "get_Buying",      0, getBuying);
+    // FailCondition + CancelCondition: base class, offset UNIQUE
     T_HOOK("Kar98k.IAP.Kunpo", "Kunpo_IAP", "FailCondition",   1, FailCondition);
     T_HOOK("Kar98k.IAP.Kunpo", "Kunpo_IAP", "CancelCondition", 1, CancelCondition);
     // MapGoogleBuyResult: IapUnityGoogle (namespace rỗng, offset UNIQUE)
@@ -382,9 +393,20 @@ void* h_t(void*) {
 
     T_STEP("cho il2cpp_init");
     for (int i = 0; i < 300 && !g_il2cpp_ready; i++) usleep(100000);
-    if (g_il2cpp_ready) LOGI("il2cpp_init xong");
-    else LOGE("Khong thay il2cpp_init -> cho them 5s");
-    for (int i = 0; i < 20; i++) usleep(250000);
+    if (g_il2cpp_ready) {
+        LOGI("il2cpp_init xong - cho them 2s on dinh");
+        for (int i = 0; i < 8; i++) usleep(250000);  // 2s
+    } else {
+        // il2cpp_init da chay truoc khi mod load - kiem tra domain luon
+        void* testDomain = il2cpp_domain_get();
+        if (testDomain) {
+            LOGI("il2cpp da san sang (domain OK) - tiep tuc ngay");
+            g_il2cpp_ready = true;
+        } else {
+            LOGE("Khong thay il2cpp_init va domain NULL -> cho them 5s");
+            for (int i = 0; i < 20; i++) usleep(250000);
+        }
+    }
 
     T_STEP("attach + cho assemblies");
     void* domain = il2cpp_domain_get();
