@@ -5,9 +5,10 @@
 //  Tính năng:
 //    [0]  Free Shop  — mua đồ không tốn tiền thật
 //
-//  HOOKS (2 hooks — Test 6 PASS trên Android 15 + MTE):
-//    - FailCondition   (Kar98k.IAP.Kunpo, Kunpo_IAP) → false: không fail
-//    - CancelCondition (Kar98k.IAP.Kunpo, Kunpo_IAP) → false: không cancel
+//  HOOKS (2 hooks — MethodInfo patch, Android 15 MTE-safe):
+//    - FallCondition   (Kar98k.IAP.Kunpo, Kunpo_IAP) → false
+//      Được gọi 1x trong purchase flow (trace xác nhận)
+//    - CancelCondition (Kar98k.IAP.Kunpo, Kunpo_IAP) → false
 //
 //  Cách dùng Free Shop:
 //    1. Chờ Toast "LGL Mod: lib XX:XX:XX" hiện lên
@@ -15,11 +16,14 @@
 //    3. Bật toggle "Free Shop" trong menu LGL
 //    4. Bấm mua item trong shop
 //    5. Dialog Google Pay hiện → bấm Hủy/Back
-//    6. CancelCondition → false → game không cancel → cấp đồ
+//    6. FallCondition → false → game nhận đồ
 //
-//  Ghi chú kỹ thuật:
-//    Android 15 MTE crash khi hook setTS/getTS cùng CancelCond.
-//    Build này chỉ có Free Shop (không Speed) để tránh crash.
+//  Ghi chú kỹ thuật (Test 14):
+//    - Android 15 MTE: Dobby trampoline cho IL2CPP method → crash
+//      Fix: PatchMethodPointer — ghi đè methodPointer trực tiếp
+//      (mprotect RW → atomic store → mprotect R), không trampoline
+//    - Tên đúng là FallCondition (không phải FailCondition)
+//      Trace IL2CPP Tool xác nhận FallCondition được gọi 1x khi mua
 // ============================================================
 
 #define LOG_TAG      "CHAMPIONFORGE_MOD"
@@ -39,6 +43,7 @@
 #include <link.h>
 #include <elf.h>
 #include <fcntl.h>
+#include <errno.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
 #include <android/log.h>
@@ -212,7 +217,24 @@ static bool DoHook(void* addr, void* hook, void** orig, const char* name) {
     if (r == 0) { LOGI("Hook OK: %s @ %p", name, addr); return true; }
     LOGE("Hook FAIL(%d): %s @ %p", r, name, addr); return false;
 }
-// T_HOOK từ LGLTrace.h — dùng trực tiếp (không redefine để TraceReport() đếm đúng)
+
+// PatchMethodPointer: ghi đè trực tiếp methodPointer trong MethodInfo struct.
+// Không dùng Dobby trampoline → tránh MTE crash trên Android 15.
+static bool PatchMethodPointer(void* method_info, void* new_fn, void** orig_out, const char* tag) {
+    if (!method_info || !new_fn || !orig_out) { LOGE("PatchMethodPointer [%s]: NULL arg", tag); return false; }
+    void** fn_field = (void**)method_info;
+    *orig_out = *fn_field;
+    if (!*orig_out) { LOGE("PatchMethodPointer [%s]: methodPointer = NULL", tag); return false; }
+    if (*orig_out == new_fn) { LOGI("PatchMethodPointer [%s]: da patch roi", tag); return true; }
+    uintptr_t page = (uintptr_t)fn_field & ~(uintptr_t)0xFFF;
+    if (mprotect((void*)page, 0x1000, PROT_READ | PROT_WRITE) != 0) {
+        LOGE("PatchMethodPointer [%s]: mprotect FAIL errno=%d", tag, errno); return false;
+    }
+    __atomic_store_n(fn_field, new_fn, __ATOMIC_SEQ_CST);
+    mprotect((void*)page, 0x1000, PROT_READ);
+    LOGI("PatchMethodPointer [%s] OK: orig=%p hook=%p", tag, *orig_out, new_fn);
+    return true;
+}
 
 // ═══════════════════════════════════════════════════════════
 //  4. TRẠNG THÁI CHỨC NĂNG
@@ -222,21 +244,21 @@ static bool g_freeShop = false;  // [0] Free Shop
 // ═══════════════════════════════════════════════════════════
 //  5. FREE SHOP — Kunpo IAP Framework
 //
-//  Luồng mua hàng (Kunpo IAP):
+//  Luồng mua hàng (trace xác nhận):
 //    BuyProduct → BuyProductRun (coroutine) →
 //      StepMakePurchaseOrder → StepCallPayment →
-//      if (CancelCondition) → cancel / else if (FailCondition) → fail / else → success
+//      IapUnityGoogle.OnGooglePayment → CancelGoogleOrderAsync →
+//      StepIfCancelPurchaseOrder → FallCondition (1x) → PurchaseEnd
 //
-//  Hook cả hai điều kiện:
-//    FailCondition   → false  (không fail)
-//    CancelCondition → false  (không cancel khi user bấm Hủy Google Pay)
+//  Hook FallCondition → false: game không "fall" → cấp đồ
+//  Hook CancelCondition → false: dự phòng cho các item khác
 // ═══════════════════════════════════════════════════════════
 
-bool (*o_FailCondition)(void*, void*, void*) = nullptr;
-bool h_FailCondition(void* self, void* buyProduct, void* mi) {
-    T_COUNT(FailCondition);
-    if (g_freeShop) return false;
-    return o_FailCondition ? o_FailCondition(self, buyProduct, mi) : false;
+bool (*o_FallCondition)(void*, void*, void*) = nullptr;
+bool h_FallCondition(void* self, void* buyProduct, void* mi) {
+    T_COUNT(FallCondition);
+    if (g_freeShop) { LOGI("FreeShop: FallCondition blocked"); return false; }
+    return o_FallCondition ? o_FallCondition(self, buyProduct, mi) : false;
 }
 
 bool (*o_CancelCondition)(void*, void*, void*) = nullptr;
@@ -247,13 +269,21 @@ bool h_CancelCondition(void* self, void* buyProduct, void* mi) {
 }
 
 // ═══════════════════════════════════════════════════════════
-//  6. ResolveAll — 2 hooks Free Shop (Test 6 PASS Android 15)
+//  6. ResolveAll — MethodInfo patch (không Dobby → MTE-safe)
 // ═══════════════════════════════════════════════════════════
 static void ResolveAll() {
-    LOGI("=== Resolve START (2 hooks: FailCond+CancelCond) ===");
+    LOGI("=== Resolve START (MethodInfo patch, FallCond+CancelCond) ===");
 
-    T_HOOK("Kar98k.IAP.Kunpo", "Kunpo_IAP", "FailCondition",   1, FailCondition);
-    T_HOOK("Kar98k.IAP.Kunpo", "Kunpo_IAP", "CancelCondition", 1, CancelCondition);
+    void* klass = GetClass("Kar98k.IAP.Kunpo", "Kunpo_IAP");
+    if (!klass) { LOGE("Kunpo_IAP NOT FOUND"); return; }
+
+    void* m_fall = FindMethod(klass, "FallCondition", 1);
+    if (m_fall) PatchMethodPointer(m_fall, (void*)h_FallCondition, (void**)&o_FallCondition, "FallCondition");
+    else LOGE("FindMethod FallCondition FAIL");
+
+    void* m_cancel = FindMethod(klass, "CancelCondition", 1);
+    if (m_cancel) PatchMethodPointer(m_cancel, (void*)h_CancelCondition, (void**)&o_CancelCondition, "CancelCondition");
+    else LOGE("FindMethod CancelCondition FAIL");
 
     TraceReport();
     LOGI("=== Resolve DONE ===");
@@ -354,7 +384,7 @@ Java_com_android_support_Main_CheckOverlayPermission(JNIEnv*, jclass, jobject) {
 
 __attribute__((constructor))
 void l_m() {
-    LOGI(".so injected");
+    LOGI(".so injected (TEST14 - FallCondition + MethodInfo patch)");
     pthread_t ptid;
     pthread_create(&ptid, nullptr, h_t, nullptr);
 }
