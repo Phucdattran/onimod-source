@@ -2,30 +2,24 @@
 //  LGL MOD — com.mobibrain.championforge (v1.0.12)
 //  Test qua LGL Test Loader (máy root), sau đó ghép APK.
 //
-//  Tính năng (menu LGL):
-//    [0]  Speed      — SeekBar 1–10 (nhân timeScale)
-//    [1]  Free Shop  — mua đồ không tốn tiền thật
+//  Tính năng:
+//    [0]  Free Shop  — mua đồ không tốn tiền thật
 //
-//  HOOKS (3 hooks — đã kiểm chứng PASS trên Android 15 + MTE):
-//    - set_timeScale  (UnityEngine, Time)           → Speed
-//    - get_timeScale  (UnityEngine, Time)           → Speed (tránh nhân dồn)
-//    - FailCondition  (Kar98k.IAP.Kunpo, Kunpo_IAP) → false: không fail
-//
-//  KHÔNG hook (Android 15 MTE crash khi kết hợp với setTS):
-//    - CancelCondition  — crash SIGABRT MTE khi hook cùng setTS+getTS
-//    - MapGoogleBuyResult — crash tương tự
+//  HOOKS (2 hooks — Test 6 PASS trên Android 15 + MTE):
+//    - FailCondition   (Kar98k.IAP.Kunpo, Kunpo_IAP) → false: không fail
+//    - CancelCondition (Kar98k.IAP.Kunpo, Kunpo_IAP) → false: không cancel
 //
 //  Cách dùng Free Shop:
 //    1. Chờ Toast "LGL Mod: lib XX:XX:XX" hiện lên
 //    2. Đợi thêm 20 giây (mod cần thời gian init)
 //    3. Bật toggle "Free Shop" trong menu LGL
-//    4. Bấm mua item trong shop — FailCondition → false → mua thành công
+//    4. Bấm mua item trong shop
+//    5. Dialog Google Pay hiện → bấm Hủy/Back
+//    6. CancelCondition → false → game không cancel → cấp đồ
 //
 //  Ghi chú kỹ thuật:
-//    Android 15 bật MTE (Memory Tagging Extension) trên Unity main thread.
-//    Dobby trampoline không có MTE tag đúng → IL2CPP GC crash (SIGABRT MTE)
-//    khi quét bộ nhớ sau hook thứ 4+. Chỉ 3 hooks (setTS+getTS+FailCond)
-//    là stable trên thiết bị này (Xiaomi 13 fuxi, Android 15).
+//    Android 15 MTE crash khi hook setTS/getTS cùng CancelCond.
+//    Build này chỉ có Free Shop (không Speed) để tránh crash.
 // ============================================================
 
 #define LOG_TAG      "CHAMPIONFORGE_MOD"
@@ -223,53 +217,21 @@ static bool DoHook(void* addr, void* hook, void** orig, const char* name) {
 // ═══════════════════════════════════════════════════════════
 //  4. TRẠNG THÁI CHỨC NĂNG
 // ═══════════════════════════════════════════════════════════
-static float g_speed    = 1.0f;   // [0] Speed (SeekBar 1–10)
-static bool  g_freeShop = false;  // [1] Free Shop
+static bool g_freeShop = false;  // [0] Free Shop
 
 // ═══════════════════════════════════════════════════════════
-//  5. SPEED — hook Time.get_timeScale + Time.set_timeScale
-//     Nhân hệ số g_speed vào giá trị game đặt.
-//     Getter trả giá trị game gốc (không nhân dồn).
-// ═══════════════════════════════════════════════════════════
-static float g_gameScale = 1.0f;
-
-void  (*o_setTS)(float, void*) = nullptr;
-float (*o_getTS)(void*)        = nullptr;
-
-void h_setTS(float v, void* mi) {
-    T_COUNT(setTS);
-    g_gameScale = v;
-    if (o_setTS) o_setTS(v * g_speed, mi);
-}
-float h_getTS(void* mi) {
-    T_COUNT(getTS);
-    if (g_speed != 1.0f) return g_gameScale;  // trả giá trị game gốc, tránh nhân dồn
-    return o_getTS ? o_getTS(mi) : g_gameScale;
-}
-static void ApplySpeed() {
-    if (!o_setTS) { LOGE("Speed KHONG chay: chua hook Time.set_timeScale"); return; }
-    o_setTS(g_gameScale * g_speed, nullptr);
-    LOGI("Speed x%.0f: game dat %.2f -> thuc te %.2f", g_speed, g_gameScale, g_gameScale * g_speed);
-}
-
-// ═══════════════════════════════════════════════════════════
-//  6. FREE SHOP — Kunpo IAP Framework
+//  5. FREE SHOP — Kunpo IAP Framework
 //
 //  Luồng mua hàng (Kunpo IAP):
 //    BuyProduct → BuyProductRun (coroutine) →
-//      StepMakePurchaseOrder → StepCallPayment → StepVerification →
-//      if (FailCondition) → fail / else → FinishPurchaseSuccessOrder
+//      StepMakePurchaseOrder → StepCallPayment →
+//      if (CancelCondition) → cancel / else if (FailCondition) → fail / else → success
 //
-//  Hook duy nhất: FailCondition → false (không bao giờ fail)
-//
-//  CancelCondition và MapGoogleBuyResult KHÔNG hook vì:
-//    Android 15 MTE: hook bất kỳ hook thứ 4+ nào kết hợp với
-//    setTS+getTS → IL2CPP GC crash (SIGABRT MTE, libil2cpp @ 0x0ed6984).
-//    Test 7 (setTS+getTS+FailCond) = PASS; Test 8 (setTS+FailCond+CancelCond) = CRASH.
+//  Hook cả hai điều kiện:
+//    FailCondition   → false  (không fail)
+//    CancelCondition → false  (không cancel khi user bấm Hủy Google Pay)
 // ═══════════════════════════════════════════════════════════
 
-// FailCondition(buyProduct) → bool (instance, 1 param)
-// Trả về true nếu purchase thất bại. Hook → false để không bao giờ fail.
 bool (*o_FailCondition)(void*, void*, void*) = nullptr;
 bool h_FailCondition(void* self, void* buyProduct, void* mi) {
     T_COUNT(FailCondition);
@@ -277,31 +239,33 @@ bool h_FailCondition(void* self, void* buyProduct, void* mi) {
     return o_FailCondition ? o_FailCondition(self, buyProduct, mi) : false;
 }
 
+bool (*o_CancelCondition)(void*, void*, void*) = nullptr;
+bool h_CancelCondition(void* self, void* buyProduct, void* mi) {
+    T_COUNT(CancelCondition);
+    if (g_freeShop) return false;
+    return o_CancelCondition ? o_CancelCondition(self, buyProduct, mi) : false;
+}
+
 // ═══════════════════════════════════════════════════════════
-//  7. ResolveAll — 3 hooks (PASS trên Android 15 MTE)
+//  6. ResolveAll — 2 hooks Free Shop (Test 6 PASS Android 15)
 // ═══════════════════════════════════════════════════════════
 static void ResolveAll() {
-    LOGI("=== Resolve START (3 hooks: setTS+getTS+FailCond) ===");
+    LOGI("=== Resolve START (2 hooks: FailCond+CancelCond) ===");
 
-    // Speed: UnityEngine.Time
-    T_HOOK("UnityEngine", "Time", "set_timeScale", 1, setTS);
-    T_HOOK("UnityEngine", "Time", "get_timeScale", 0, getTS);
-
-    // Free Shop: Kunpo IAP — chỉ FailCondition
-    T_HOOK("Kar98k.IAP.Kunpo", "Kunpo_IAP", "FailCondition", 1, FailCondition);
+    T_HOOK("Kar98k.IAP.Kunpo", "Kunpo_IAP", "FailCondition",   1, FailCondition);
+    T_HOOK("Kar98k.IAP.Kunpo", "Kunpo_IAP", "CancelCondition", 1, CancelCondition);
 
     TraceReport();
     LOGI("=== Resolve DONE ===");
 }
 
 // ═══════════════════════════════════════════════════════════
-//  8. MENU — GetFeatureList + Changes
+//  7. MENU — GetFeatureList + Changes
 // ═══════════════════════════════════════════════════════════
 jobjectArray GetFeatureList(JNIEnv* env, jobject) {
     const char* features[] = {
         OBFUSCATE("Category_" GAME_NAME),
-        OBFUSCATE("0_SeekBar_Speed_1_10"),
-        OBFUSCATE("1_Toggle_Free Shop"),
+        OBFUSCATE("0_Toggle_Free Shop"),
     };
     int total = sizeof(features) / sizeof(features[0]);
     jobjectArray ret = env->NewObjectArray(
@@ -316,19 +280,9 @@ jobjectArray GetFeatureList(JNIEnv* env, jobject) {
 
 void Changes(JNIEnv* env, jclass, jobject,
              jint featNum, jstring featName, jint value, jboolean boolean, jstring str) {
-    T_STEP("bam tinh nang so %d (value=%d, bat=%d)", featNum, value, boolean);
-    LOGI("Menu: tinh nang %d -> value=%d bat=%d", featNum, value, boolean);
+    T_STEP("bam tinh nang so %d", featNum);
     switch (featNum) {
-        case 0: {
-            float spd = (float)value;
-            if (spd < 1.0f) spd = 1.0f;
-            if (spd > 10.0f) spd = 10.0f;
-            g_speed = spd;
-            LOGI("Speed: x%.0f", g_speed);
-            ApplySpeed();
-            break;
-        }
-        case 1:
+        case 0:
             g_freeShop = boolean;
             LOGI("Free Shop: %s", g_freeShop ? "BAT" : "TAT");
             break;
