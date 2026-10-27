@@ -6,23 +6,26 @@
 //    [0]  Speed      — SeekBar 1–10 (nhân timeScale)
 //    [1]  Free Shop  — mua đồ không tốn tiền thật
 //
-//  Free Shop (Kunpo IAP framework):
-//    - get_Buying      (Kar98k.IAP.Kunpo, Kunpo_IAP)  → false: xóa _isBuying stuck
-//    - FailCondition   (Kar98k.IAP.Kunpo, Kunpo_IAP)  → false: không fail
-//    - CancelCondition (Kar98k.IAP.Kunpo, Kunpo_IAP)  → false: không cancel
-//    - MapGoogleBuyResult (IapUnityGoogle)             → 0 (success): đổi mã lỗi Google Pay
+//  HOOKS (3 hooks — đã kiểm chứng PASS trên Android 15 + MTE):
+//    - set_timeScale  (UnityEngine, Time)           → Speed
+//    - get_timeScale  (UnityEngine, Time)           → Speed (tránh nhân dồn)
+//    - FailCondition  (Kar98k.IAP.Kunpo, Kunpo_IAP) → false: không fail
+//
+//  KHÔNG hook (Android 15 MTE crash khi kết hợp với setTS):
+//    - CancelCondition  — crash SIGABRT MTE khi hook cùng setTS+getTS
+//    - MapGoogleBuyResult — crash tương tự
 //
 //  Cách dùng Free Shop:
 //    1. Chờ Toast "LGL Mod: lib XX:XX:XX" hiện lên
-//    2. Đợi thêm 50 giây (mod cần thời gian init)
+//    2. Đợi thêm 20 giây (mod cần thời gian init)
 //    3. Bật toggle "Free Shop" trong menu LGL
-//    4. Bấm mua item trong shop
-//    5. Dialog Google Pay hiện → bấm Hủy/Back
-//    6. Free Shop hook đổi kết quả thành Success → item cấp về
+//    4. Bấm mua item trong shop — FailCondition → false → mua thành công
 //
-//  Lỗi "你有一笔未完成的订单":
-//    Popup này do server Kunpo báo có đơn chưa xong.
-//    FailCondition/CancelCondition → false sẽ vượt qua lỗi này.
+//  Ghi chú kỹ thuật:
+//    Android 15 bật MTE (Memory Tagging Extension) trên Unity main thread.
+//    Dobby trampoline không có MTE tag đúng → IL2CPP GC crash (SIGABRT MTE)
+//    khi quét bộ nhớ sau hook thứ 4+. Chỉ 3 hooks (setTS+getTS+FailCond)
+//    là stable trên thiết bị này (Xiaomi 13 fuxi, Android 15).
 // ============================================================
 
 #define LOG_TAG      "CHAMPIONFORGE_MOD"
@@ -257,62 +260,35 @@ static void ApplySpeed() {
 //      StepMakePurchaseOrder → StepCallPayment → StepVerification →
 //      if (FailCondition) → fail / else → FinishPurchaseSuccessOrder
 //
-//  Hook:
-//    FailCondition   → false  (không bao giờ fail)
-//    CancelCondition → false  (không bao giờ cancel)
-//    MapGoogleBuyResult → 0   (Google Pay error code → success)
+//  Hook duy nhất: FailCondition → false (không bao giờ fail)
 //
-//  NOTE: get_Buying() KHÔNG hook — gọi liên tục mỗi frame, Dobby patch
-//        khi Unity đang gọi → race condition → MTE abort (Android 15).
+//  CancelCondition và MapGoogleBuyResult KHÔNG hook vì:
+//    Android 15 MTE: hook bất kỳ hook thứ 4+ nào kết hợp với
+//    setTS+getTS → IL2CPP GC crash (SIGABRT MTE, libil2cpp @ 0x0ed6984).
+//    Test 7 (setTS+getTS+FailCond) = PASS; Test 8 (setTS+FailCond+CancelCond) = CRASH.
 // ═══════════════════════════════════════════════════════════
 
 // FailCondition(buyProduct) → bool (instance, 1 param)
 // Trả về true nếu purchase thất bại. Hook → false để không bao giờ fail.
-bool (*o_FailCondition)(void*, void*, void*)   = nullptr;
+bool (*o_FailCondition)(void*, void*, void*) = nullptr;
 bool h_FailCondition(void* self, void* buyProduct, void* mi) {
     T_COUNT(FailCondition);
     if (g_freeShop) return false;
     return o_FailCondition ? o_FailCondition(self, buyProduct, mi) : false;
 }
 
-// CancelCondition(buyProduct) → bool (instance, 1 param)
-// Trả về true nếu purchase bị huỷ. Hook → false để không bao giờ cancel.
-bool (*o_CancelCondition)(void*, void*, void*) = nullptr;
-bool h_CancelCondition(void* self, void* buyProduct, void* mi) {
-    T_COUNT(CancelCondition);
-    if (g_freeShop) return false;
-    return o_CancelCondition ? o_CancelCondition(self, buyProduct, mi) : false;
-}
-
-// MapGoogleBuyResult(BuyResultCode, GooglePayment) → int32 (instance, 2 params)
-// Chuyển đổi kết quả Google Play thành mã nội bộ. 0 = success.
-// Hook → 0 để mọi kết quả Google Pay đều được coi là thành công.
-int (*o_MapGBuyResult)(void*, int, void*, void*) = nullptr;
-int h_MapGBuyResult(void* self, int buyResultCode, void* googlePayment, void* mi) {
-    T_COUNT(MapGBuyResult);
-    if (g_freeShop) {
-        LOGI("FreeShop: MapGoogleBuyResult(%d) -> 0 (success)", buyResultCode);
-        return 0;
-    }
-    return o_MapGBuyResult ? o_MapGBuyResult(self, buyResultCode, googlePayment, mi) : buyResultCode;
-}
-
 // ═══════════════════════════════════════════════════════════
-//  7. ResolveAll
+//  7. ResolveAll — 3 hooks (PASS trên Android 15 MTE)
 // ═══════════════════════════════════════════════════════════
 static void ResolveAll() {
-    LOGI("=== Resolve START ===");
+    LOGI("=== Resolve START (3 hooks: setTS+getTS+FailCond) ===");
 
-    // [0] Speed: UnityEngine.Time
+    // Speed: UnityEngine.Time
     T_HOOK("UnityEngine", "Time", "set_timeScale", 1, setTS);
     T_HOOK("UnityEngine", "Time", "get_timeScale", 0, getTS);
 
-    // [1] Free Shop: Kunpo IAP
-    // FailCondition + CancelCondition: base class, offset UNIQUE
-    T_HOOK("Kar98k.IAP.Kunpo", "Kunpo_IAP", "FailCondition",   1, FailCondition);
-    T_HOOK("Kar98k.IAP.Kunpo", "Kunpo_IAP", "CancelCondition", 1, CancelCondition);
-    // MapGoogleBuyResult: IapUnityGoogle (namespace rỗng, offset UNIQUE)
-    T_HOOK("", "IapUnityGoogle", "MapGoogleBuyResult", 2, MapGBuyResult);
+    // Free Shop: Kunpo IAP — chỉ FailCondition
+    T_HOOK("Kar98k.IAP.Kunpo", "Kunpo_IAP", "FailCondition", 1, FailCondition);
 
     TraceReport();
     LOGI("=== Resolve DONE ===");
