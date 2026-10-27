@@ -222,14 +222,7 @@ template <typename T> static inline T& Field(void* obj, int off) {
 static float g_speed    = 1.0f;   // [0] Speed (SeekBar)
 static bool  g_freeShop = false;  // [1] Free Shop
 
-// IAPManager cached methods (tất cả đều private, cần cache thủ công)
-// dump: private void server_verify_success(string productsId, uint goodId,
-//           string order_id, int payEnv, string transactionID, string purchaseReceipt)
-typedef void (*t_server_verify_success)(void* self,
-    void* productsId, uint32_t goodId, void* order_id, int32_t payEnv,
-    void* transactionID, void* purchaseReceipt, void* mi);
-static t_server_verify_success g_fn_serverVerify = nullptr;
-
+// IAPManager cached methods
 // dump: private void client_request_success(string product, uint goodId)
 typedef void (*t_client_request_success)(void* self, void* productId, uint32_t goodId, void* mi);
 static t_client_request_success g_fn_clientSuccess = nullptr;
@@ -268,8 +261,7 @@ static void ApplySpeed() {
 //  6. HOOKS
 // ═══════════════════════════════════════════════════════════
 
-// BuyProduct — khi Free Shop bật: skip Google Pay, gọi server_verify_success trực tiếp
-// (server_verify_success là response đã xác nhận từ server → trigger toàn bộ luồng cấp đồ)
+// BuyProduct — khi Free Shop bật: skip Google Pay, cấp đồ trực tiếp
 // dump: public void BuyProduct(string productId, uint goodId) — instance, 2 params
 void (*o_BuyProduct)(void*, void*, uint32_t, void*) = nullptr;
 void h_BuyProduct(void* self, void* productId, uint32_t goodId, void* mi) {
@@ -279,33 +271,22 @@ void h_BuyProduct(void* self, void* productId, uint32_t goodId, void* mi) {
     if (g_freeShop) {
         LOGI("FreeShop: chan BuyProduct goodId=%u", goodId);
 
-        // Bước 1: server_verify_success = giả lập server đã xác nhận mua hàng
-        // Đây là entry point cho toàn bộ flow cấp đồ nội bộ
-        if (g_fn_serverVerify && self && productId && il2cpp_string_new) {
-            void* fakeOrder = il2cpp_string_new("free_order_001");
-            void* fakeTx    = il2cpp_string_new("GPA.free_transaction");
-            void* fakeRcpt  = il2cpp_string_new("{}");
-            LOGI("FreeShop: goi server_verify_success...");
-            g_fn_serverVerify(self, productId, goodId, fakeOrder, 1, fakeTx, fakeRcpt, nullptr);
-            LOGI("FreeShop: server_verify_success xong");
-        }
-        // Bước 2: gọi thêm client_request_success (nếu không chạy tự động từ bước 1)
-        else if (g_fn_clientSuccess && self && productId) {
-            LOGI("FreeShop: fallback - goi client_request_success...");
-            g_fn_clientSuccess(self, productId, goodId, nullptr);
-            LOGI("FreeShop: client_request_success xong");
-        }
-        else {
-            LOGE("FreeShop: KHONG CO CACHE! verify=%p success=%p self=%p pid=%p il2str=%p",
-                 (void*)g_fn_serverVerify, (void*)g_fn_clientSuccess,
-                 self, productId, (void*)il2cpp_string_new);
-        }
-
-        // Bước 3: ReplenishPurchase — đảm bảo đồ được cộng vào tài khoản
+        // ReplenishPurchase: cấp đồ trực tiếp (local, KHÔNG network)
+        // Đây là method cuối cùng trong flow mua hàng — xử lý hoàn toàn client-side
         if (g_fn_replenish && self && productId) {
             LOGI("FreeShop: goi ReplenishPurchase...");
             g_fn_replenish(self, productId, nullptr);
             LOGI("FreeShop: ReplenishPurchase xong");
+        } else {
+            // fallback: client_request_success
+            if (g_fn_clientSuccess && self && productId) {
+                LOGI("FreeShop: fallback client_request_success...");
+                g_fn_clientSuccess(self, productId, goodId, nullptr);
+                LOGI("FreeShop: client_request_success xong");
+            } else {
+                LOGE("FreeShop: KHONG CO CACHE! replenish=%p clientSucc=%p self=%p pid=%p",
+                     (void*)g_fn_replenish, (void*)g_fn_clientSuccess, self, productId);
+            }
         }
 
         return;  // không gọi gốc = không hiện dialog Google Pay
@@ -348,13 +329,13 @@ static void ResolveAll() {
     // Cache các method private của IAPManager
     void* iapKlass = FindClassAnywhere("IAPManager");
     if (iapKlass) {
-        // server_verify_success: 6 params (string,uint,string,int,string,string)
-        void* m = FindMethod(iapKlass, "server_verify_success", 6);
+        // ReplenishPurchase: 1 param (string) — cấp đồ trực tiếp, local
+        void* m = FindMethod(iapKlass, "ReplenishPurchase", 1);
         if (m) {
-            g_fn_serverVerify = (t_server_verify_success) MethodFnPtr(m);
-            LOGI("server_verify_success cached: %p", (void*)g_fn_serverVerify);
+            g_fn_replenish = (t_ReplenishPurchase) MethodFnPtr(m);
+            LOGI("ReplenishPurchase cached: %p", (void*)g_fn_replenish);
         } else {
-            LOGE("server_verify_success NOT FOUND (6 params)");
+            LOGE("ReplenishPurchase NOT FOUND (1 param)");
         }
 
         // client_request_success: 2 params (string, uint) — fallback
@@ -364,15 +345,6 @@ static void ResolveAll() {
             LOGI("client_request_success cached: %p", (void*)g_fn_clientSuccess);
         } else {
             LOGE("client_request_success NOT FOUND (2 params)");
-        }
-
-        // ReplenishPurchase: 1 param (string) — cấp đồ sau verify
-        m = FindMethod(iapKlass, "ReplenishPurchase", 1);
-        if (m) {
-            g_fn_replenish = (t_ReplenishPurchase) MethodFnPtr(m);
-            LOGI("ReplenishPurchase cached: %p", (void*)g_fn_replenish);
-        } else {
-            LOGE("ReplenishPurchase NOT FOUND (1 param)");
         }
     } else {
         LOGE("IAPManager class NOT FOUND");
@@ -384,9 +356,8 @@ static void ResolveAll() {
 
     TraceReport();
     LOGI("=== Resolve DONE ===");
-    LOGI("Cache: serverVerify=%p clientSuccess=%p replenish=%p il2str=%p",
-         (void*)g_fn_serverVerify, (void*)g_fn_clientSuccess,
-         (void*)g_fn_replenish, (void*)il2cpp_string_new);
+    LOGI("Cache: replenish=%p clientSuccess=%p",
+         (void*)g_fn_replenish, (void*)g_fn_clientSuccess);
 }
 
 // ═══════════════════════════════════════════════════════════
