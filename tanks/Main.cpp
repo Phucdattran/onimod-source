@@ -250,17 +250,12 @@ static void ApplySpeed() {
 // ═══════════════════════════════════════════════════════════
 //  6. FREE SHOP
 //
-//  V6 strategy: hook <BuyProductID>b__0 (the succeedAction lambda) directly.
-//  The lambda validates skProduct fields (transactionId etc.) — fake product fails.
-//  By hooking the lambda we skip validation and extract the REAL closure fields:
-//    closure.t10 = productInfo (varies per item)
-//    closure.t20 = IapSayManager self (constant singleton)
-//    closure.t30 = innerSucceed delegate OR reward (constant)
-//  Then call h_ConfirmValidatedPurchase directly with these extracted values.
-//
-//  h_ConfirmValidatedPurchase handles two cases:
-//    - innerSucceed non-null: call innerSucceed(null) -> ApplyGrantedPurchase
-//    - innerSucceed null (our bypass path): try reward as a delegate
+//  V7: Lambda hook FAILED (class <>c__DisplayClass9_0 not found in Source.Shop).
+//  Fix: extract closure directly from succeedAction delegate in h_BuyProductID:
+//    succeedAction[0x20] = closure (<>c__DisplayClass9_0 instance)
+//    closure[0x20] = IapSayManager self (constant singleton)
+//    closure[0x30] = innerSucceed delegate (constant)
+//  Call t30 as delegate directly — bypass lambda validation entirely.
 // ═══════════════════════════════════════════════════════════
 typedef void (*t_BuyProductID)(void* self, void* productInfo, void* succeedAction, void* failedAction, void* mi);
 static t_BuyProductID o_BuyProductID = nullptr;
@@ -268,97 +263,48 @@ static t_BuyProductID o_BuyProductID = nullptr;
 void h_BuyProductID(void* self, void* productInfo, void* succeedAction, void* failedAction, void* mi) {
     T_COUNT(BuyProductID);
     if (g_freeShop && succeedAction) {
-        void* methodPtr  = Field<void*>(succeedAction, 0x10);
-        void* target     = Field<void*>(succeedAction, 0x20);
-        void* methodInfo = Field<void*>(succeedAction, 0x28);
+        // target field of delegate = closure object (<>c__DisplayClass9_0 instance)
+        void* closure = Field<void*>(succeedAction, 0x20);
+        LOGI("FreeShop: BuyProductID closure=%p", closure);
 
-        // Create fake SKPurchasedProduct for isinst check in lambda
-        void* fakeProduct = (g_skPurchasedKlass && il2cpp_object_new)
-            ? il2cpp_object_new(g_skPurchasedKlass) : productInfo;
+        if (closure) {
+            void* t20 = Field<void*>(closure, 0x20); // IapSayManager self (constant)
+            void* t30 = Field<void*>(closure, 0x30); // innerSucceed delegate (constant)
+            void* t38 = Field<void*>(closure, 0x38); // maybe innerFail
+            LOGI("FreeShop: t20=%p t30=%p t38=%p", t20, t30, t38);
 
-        LOGI("FreeShop: BuyProductID -> calling lambda ptr=%p target=%p fake=%p",
-             methodPtr, target, fakeProduct);
-
-        if (methodPtr) {
-            // Call the lambda - h_SucceedLambda hook intercepts and bypasses validation
-            typedef void (*ClosureFn)(void* target, void* product, void* mi);
-            ((ClosureFn)methodPtr)(target, fakeProduct, methodInfo);
-            LOGI("FreeShop: lambda xong");
+            // Call t30 as delegate directly -- skip lambda, skip product validation
+            if (t30) {
+                void* method = Field<void*>(t30, 0x10);
+                void* tgt    = Field<void*>(t30, 0x20);
+                void* dMi    = Field<void*>(t30, 0x28);
+                LOGI("FreeShop: t30 method=%p tgt=%p", method, tgt);
+                if (method) {
+                    typedef void (*DelegateFn)(void* t, void* p, void* mi);
+                    ((DelegateFn)method)(tgt, nullptr, dMi);
+                    LOGI("FreeShop: grant xong!");
+                } else {
+                    LOGE("FreeShop: t30.method NULL");
+                }
+            } else {
+                LOGE("FreeShop: t30 NULL");
+            }
         } else {
-            LOGE("FreeShop: methodPtr NULL");
+            LOGE("FreeShop: closure NULL");
         }
         return;
     }
     if (o_BuyProductID) o_BuyProductID(self, productInfo, succeedAction, failedAction, mi);
 }
 
-// Forward declaration (h_ConfirmValidatedPurchase defined below)
-void h_ConfirmValidatedPurchase(void* self, void* product, void* reward, void* innerSucceed, void* innerFail, void* mi);
-
-// Hook on <BuyProductID>b__0 — intercept the lambda to bypass product validation
-typedef void (*t_SucceedLambda)(void* closure, void* skProduct, void* mi);
-static t_SucceedLambda o_SucceedLambda = nullptr;
-
-void h_SucceedLambda(void* closure, void* skProduct, void* mi) {
-    T_COUNT(SucceedLambda);
-    if (g_freeShop && closure) {
-        // Closure layout (DisplayClass9_0):
-        //   +0x10 = productInfo  (varies per item)
-        //   +0x20 = IapSayManager self  (constant singleton)
-        //   +0x30 = innerSucceed delegate OR reward (constant)
-        void* t10 = Field<void*>(closure, 0x10);
-        void* t20 = Field<void*>(closure, 0x20);
-        void* t30 = Field<void*>(closure, 0x30);
-        void* t38 = Field<void*>(closure, 0x38);
-        void* t40 = Field<void*>(closure, 0x40);
-        LOGI("FreeShop: Lambda bypass t10=%p t20=%p t30=%p t38=%p t40=%p",
-             t10, t20, t30, t38, t40);
-
-        // Call h_ConfirmValidatedPurchase directly with:
-        //   self=t20, product=skProduct, reward=t30, innerSucceed=null
-        // h_ConfirmValidatedPurchase will try t30 as delegate if innerSucceed is null
-        h_ConfirmValidatedPurchase(t20, skProduct, t30, nullptr, nullptr, mi);
-        return;
-    }
-    if (o_SucceedLambda) o_SucceedLambda(closure, skProduct, mi);
-}
-
-// ConfirmValidatedPurchase(SKPurchasedProduct, RewardArray, Action<SKPurchasedProduct>, Action) = 4 params
+// ConfirmValidatedPurchase(SKPurchasedProduct, RewardArray, Action<IapItemPurchasedResult>, Action) = 4 params
 typedef void (*t_ConfirmValidatedPurchase)(void* self, void* product, void* reward, void* innerSucceed, void* innerFail, void* mi);
 static t_ConfirmValidatedPurchase o_ConfirmValidatedPurchase = nullptr;
 
 void h_ConfirmValidatedPurchase(void* self, void* product, void* reward, void* innerSucceed, void* innerFail, void* mi) {
     T_COUNT(ConfirmValidatedPurchase);
-    if (g_freeShop) {
-        LOGI("FreeShop: ConfirmValidatedPurchase self=%p prod=%p rwd=%p inner=%p",
-             self, product, reward, innerSucceed);
-
-        // Try innerSucceed delegate first
-        void* delegateToCall = innerSucceed;
-        if (!delegateToCall) {
-            // Fallback: try reward as a delegate (closure.t30 might be innerSucceed not reward)
-            delegateToCall = reward;
-            if (delegateToCall)
-                LOGI("FreeShop: innerSucceed null, trying reward as delegate");
-        }
-
-        if (delegateToCall) {
-            void* method = Field<void*>(delegateToCall, 0x10);
-            void* target = Field<void*>(delegateToCall, 0x20);
-            void* dMi    = Field<void*>(delegateToCall, 0x28);
-            LOGI("FreeShop: delegate method=%p target=%p", method, target);
-            if (method) {
-                typedef void (*DelegateFn)(void* t, void* p, void* mi);
-                ((DelegateFn)method)(target, nullptr, dMi);
-                LOGI("FreeShop: grant xong!");
-            } else {
-                LOGE("FreeShop: delegate.method_ptr NULL");
-            }
-        } else {
-            LOGE("FreeShop: no callable delegate (innerSucceed=null, reward=null)");
-        }
-        return;
-    }
+    LOGI("FreeShop: ConfirmValidatedPurchase self=%p prod=%p rwd=%p inner=%p",
+         self, product, reward, innerSucceed);
     if (o_ConfirmValidatedPurchase) o_ConfirmValidatedPurchase(self, product, reward, innerSucceed, innerFail, mi);
 }
 
@@ -376,10 +322,8 @@ static void ResolveAll() {
     // [1] Free Shop
     T_HOOK("Source.Shop", "IapSayManager", "BuyProductID", 3, BuyProductID);
     T_HOOK("Source.Shop", "IapSayManager", "ConfirmValidatedPurchase", 4, ConfirmValidatedPurchase);
-    // Hook the lambda <BuyProductID>b__0 to bypass product field validation
-    T_HOOK("Source.Shop", "<>c__DisplayClass9_0", "<BuyProductID>b__0", 1, SucceedLambda);
 
-    // Cache SKPurchasedProduct klass de il2cpp_object_new tao fake product dung type
+    // Cache SKPurchasedProduct klass
     g_skPurchasedKlass = FindClassAnywhere("SKPurchasedProduct");
     LOGI("SKPurchasedProduct klass: %p", g_skPurchasedKlass);
 
