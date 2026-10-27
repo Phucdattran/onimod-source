@@ -199,6 +199,13 @@ void* FindMethod(void* klass, const char* name, int nParams) {
 static void* GetClass(const char* ns, const char* cls) {
     return (ns && *ns) ? FindClass(ns, cls) : FindClassAnywhere(cls);
 }
+void* MethodAddr(const char* ns, const char* cls, const char* method, int nParams) {
+    void* k = GetClass(ns, cls);
+    if (!k) { LOGE("NOT FOUND class: %s", cls); return nullptr; }
+    void* m = FindMethod(k, method, nParams);
+    if (!m) { LOGE("NOT FOUND: %s.%s(%d)", cls, method, nParams); return nullptr; }
+    return MethodFnPtr(m);
+}
 template <typename T> static inline T& Field(void* obj, int off) {
     return *(T*)((uintptr_t)obj + off);
 }
