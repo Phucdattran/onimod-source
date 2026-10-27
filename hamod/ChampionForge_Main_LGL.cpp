@@ -5,25 +5,19 @@
 //  Tính năng:
 //    [0]  Free Shop  — mua đồ không tốn tiền thật
 //
-//  HOOKS (2 hooks — MethodInfo patch, Android 15 MTE-safe):
-//    - FallCondition   (Kar98k.IAP.Kunpo, Kunpo_IAP) → false
-//      Được gọi 1x trong purchase flow (trace xác nhận)
-//    - CancelCondition (Kar98k.IAP.Kunpo, Kunpo_IAP) → false
+//  HOOKS (PatchMethodPointer, Android 15 MTE-safe + T_HOOK UNIQUE):
+//    - GManager_IAP_Hw::BuyProduct(string)   → bỏ qua Google Pay,
+//        gọi GPay.AddGoodsId(goodsId,1) qua il2cpp_runtime_invoke
+//    - GPay::CountById(string)               → luôn trả 999 (UI owned)
+//    - Kunpo_IAP::FallCondition(BuyProduct)  → false (an toàn)
+//    - Kunpo_IAP::CancelCondition(BuyProduct)→ false (an toàn)
+//    - Kunpo_IAP::SendAward()  [T_HOOK]      → log để debug
 //
 //  Cách dùng Free Shop:
 //    1. Chờ Toast "LGL Mod: lib XX:XX:XX" hiện lên
-//    2. Đợi thêm 20 giây (mod cần thời gian init)
-//    3. Bật toggle "Free Shop" trong menu LGL
-//    4. Bấm mua item trong shop
-//    5. Dialog Google Pay hiện → bấm Hủy/Back
-//    6. FallCondition → false → game nhận đồ
-//
-//  Ghi chú kỹ thuật (Test 14):
-//    - Android 15 MTE: Dobby trampoline cho IL2CPP method → crash
-//      Fix: PatchMethodPointer — ghi đè methodPointer trực tiếp
-//      (mprotect RW → atomic store → mprotect R), không trampoline
-//    - Tên đúng là FallCondition (không phải FailCondition)
-//      Trace IL2CPP Tool xác nhận FallCondition được gọi 1x khi mua
+//    2. Bật toggle "Free Shop" trong menu LGL
+//    3. Bấm mua item trong shop
+//    4. KHÔNG hiện Google Pay dialog — item được ghi thẳng vào client
 // ============================================================
 
 #define LOG_TAG      "CHAMPIONFORGE_MOD"
@@ -74,6 +68,8 @@ const char* (*il2cpp_method_get_name)(void*)                               = nul
 uint32_t    (*il2cpp_method_get_param_count)(void*)                        = nullptr;
 void*       (*il2cpp_class_get_field_from_name)(void*, const char*)        = nullptr;
 size_t      (*il2cpp_field_get_offset)(void*)                              = nullptr;
+void*       (*il2cpp_runtime_invoke)(void*, void*, void**, void**)         = nullptr;
+void*       (*il2cpp_string_new)(const char*)                              = nullptr;
 
 // ═══════════════════════════════════════════════════════════
 //  2. ElfSym — KHÔNG dùng dlopen (chỉ đọc bộ nhớ)
@@ -133,11 +129,13 @@ bool InitIL2CppAPI() {
     LOAD(il2cpp_class_get_methods); LOAD(il2cpp_method_get_name);
     LOAD(il2cpp_method_get_param_count);
     LOAD(il2cpp_class_get_field_from_name); LOAD(il2cpp_field_get_offset);
+    LOAD(il2cpp_runtime_invoke);   LOAD(il2cpp_string_new);
     #undef LOAD
     bool ok = il2cpp_domain_get && il2cpp_domain_get_assemblies &&
               il2cpp_assembly_get_image && il2cpp_class_from_name &&
-              il2cpp_class_get_methods && il2cpp_method_get_name;
-    LOGI("InitIL2CppAPI: %s", ok ? "OK" : "FAIL");
+              il2cpp_class_get_methods && il2cpp_method_get_name &&
+              il2cpp_runtime_invoke;
+    LOGI("InitIL2CppAPI: %s (invoke=%p)", ok ? "OK" : "FAIL", il2cpp_runtime_invoke);
     return ok;
 }
 
@@ -201,13 +199,6 @@ void* FindMethod(void* klass, const char* name, int nParams) {
 static void* GetClass(const char* ns, const char* cls) {
     return (ns && *ns) ? FindClass(ns, cls) : FindClassAnywhere(cls);
 }
-void* MethodAddr(const char* ns, const char* cls, const char* method, int nParams) {
-    void* k = GetClass(ns, cls);
-    if (!k) { LOGE("NOT FOUND class: %s", cls); return nullptr; }
-    void* m = FindMethod(k, method, nParams);
-    if (!m) { LOGE("NOT FOUND: %s.%s(%d)", cls, method, nParams); return nullptr; }
-    return MethodFnPtr(m);
-}
 template <typename T> static inline T& Field(void* obj, int off) {
     return *(T*)((uintptr_t)obj + off);
 }
@@ -220,6 +211,7 @@ static bool DoHook(void* addr, void* hook, void** orig, const char* name) {
 
 // PatchMethodPointer: ghi đè trực tiếp methodPointer trong MethodInfo struct.
 // Không dùng Dobby trampoline → tránh MTE crash trên Android 15.
+// Chỉ patch đúng MethodInfo đó, không ảnh hưởng các method dùng chung địa chỉ.
 static bool PatchMethodPointer(void* method_info, void* new_fn, void** orig_out, const char* tag) {
     if (!method_info || !new_fn || !orig_out) { LOGE("PatchMethodPointer [%s]: NULL arg", tag); return false; }
     void** fn_field = (void**)method_info;
@@ -241,19 +233,63 @@ static bool PatchMethodPointer(void* method_info, void* new_fn, void** orig_out,
 // ═══════════════════════════════════════════════════════════
 static bool g_freeShop = false;  // [0] Free Shop
 
+// MethodInfo của GPay.AddGoodsId — cache để gọi qua il2cpp_runtime_invoke
+static void* g_mi_AddGoodsId = nullptr;
+
 // ═══════════════════════════════════════════════════════════
-//  5. FREE SHOP — Kunpo IAP Framework
+//  5. HOOKS — Free Shop (Kunpo IAP Framework)
 //
-//  Luồng mua hàng (trace xác nhận):
-//    BuyProduct → BuyProductRun (coroutine) →
-//      StepMakePurchaseOrder → StepCallPayment →
-//      IapUnityGoogle.OnGooglePayment → CancelGoogleOrderAsync →
-//      StepIfCancelPurchaseOrder → FallCondition (1x) → PurchaseEnd
+//  Chiến lược:
+//    A. GManager_IAP_Hw::BuyProduct(string)  [SHARED STUB → PatchMethodPointer]
+//       → Bỏ qua Google Pay, gọi GPay.AddGoodsId(goodsId,1)
+//         qua il2cpp_runtime_invoke để cộng vào _shoppingList.
 //
-//  Hook FallCondition → false: game không "fall" → cấp đồ
-//  Hook CancelCondition → false: dự phòng cho các item khác
+//    B. GPay::CountById(string)  [SHARED → PatchMethodPointer]
+//       → Trả 999 để UI shop hiện "đã sở hữu".
+//
+//    C. Kunpo_IAP::FallCondition / CancelCondition  [UNIQUE → PatchMethodPointer]
+//       → false để chặn cancel path nếu flow gốc bị trigger.
+//
+//    D. Kunpo_IAP::SendAward()  [UNIQUE 0x31CD9E8 → T_HOOK + log]
+//       → Gọi bản gốc, chỉ log để xem khi nào được gọi.
 // ═══════════════════════════════════════════════════════════
 
+// --- A. GManager_IAP_Hw::BuyProduct(string goodsId) ---
+// private System.Void BuyProduct(System.String goodsId); → SHARED STUB 0x11C74E4
+// Chữ ký instance: (void* self, void* goodsIdStr, void* mi)
+void (*o_IAPBuyProduct)(void*, void*, void*) = nullptr;
+void h_IAPBuyProduct(void* self, void* goodsIdStr, void* mi) {
+    T_COUNT(IAPBuyProduct);
+    if (g_freeShop) {
+        LOGI("FreeShop: BuyProduct intercepted goodsId=%p", goodsIdStr);
+        if (g_mi_AddGoodsId && il2cpp_runtime_invoke && goodsIdStr) {
+            void* exc = nullptr;
+            int32_t count = 1;
+            void* args[] = { goodsIdStr, (void*)&count };
+            il2cpp_runtime_invoke(g_mi_AddGoodsId, nullptr, args, &exc);
+            if (exc) LOGE("FreeShop: AddGoodsId threw exception");
+            else LOGI("FreeShop: AddGoodsId OK");
+        } else {
+            LOGE("FreeShop: AddGoodsId invoke skip (mi=%p invoke=%p goodsId=%p)",
+                 g_mi_AddGoodsId, il2cpp_runtime_invoke, goodsIdStr);
+        }
+        return;  // không gọi original → không hiện Google Pay
+    }
+    if (o_IAPBuyProduct) o_IAPBuyProduct(self, goodsIdStr, mi);
+}
+
+// --- B. GPay::CountById(string id) → trả về 999 khi Free Shop ---
+// public static System.Int32 CountById(System.String id); → SHARED → PatchMethodPointer
+// Chữ ký static: (void* idStr, void* mi)
+int32_t (*o_CountById)(void*, void*) = nullptr;
+int32_t h_CountById(void* idStr, void* mi) {
+    T_COUNT(CountById);
+    if (g_freeShop) return 999;
+    return o_CountById ? o_CountById(idStr, mi) : 0;
+}
+
+// --- C. Kunpo_IAP::FallCondition(BuyProduct) → false ---
+// UNIQUE address 0x31CDA2C → PatchMethodPointer an toàn
 bool (*o_FallCondition)(void*, void*, void*) = nullptr;
 bool h_FallCondition(void* self, void* buyProduct, void* mi) {
     T_COUNT(FallCondition);
@@ -261,6 +297,8 @@ bool h_FallCondition(void* self, void* buyProduct, void* mi) {
     return o_FallCondition ? o_FallCondition(self, buyProduct, mi) : false;
 }
 
+// --- C. Kunpo_IAP::CancelCondition(BuyProduct) → false ---
+// UNIQUE address 0x31CDA34 → PatchMethodPointer an toàn
 bool (*o_CancelCondition)(void*, void*, void*) = nullptr;
 bool h_CancelCondition(void* self, void* buyProduct, void* mi) {
     T_COUNT(CancelCondition);
@@ -268,25 +306,75 @@ bool h_CancelCondition(void* self, void* buyProduct, void* mi) {
     return o_CancelCondition ? o_CancelCondition(self, buyProduct, mi) : false;
 }
 
+// --- D. Kunpo_IAP::SendAward() — log only, gọi bản gốc ---
+// UNIQUE address 0x31CD9E8 → T_HOOK an toàn
+void (*o_SendAward)(void*, void*) = nullptr;
+void h_SendAward(void* self, void* mi) {
+    T_COUNT(SendAward);
+    LOGI("SendAward CALLED! self=%p (freeShop=%d)", self, (int)g_freeShop);
+    if (o_SendAward) o_SendAward(self, mi);
+}
+
 // ═══════════════════════════════════════════════════════════
-//  6. ResolveAll — MethodInfo patch (không Dobby → MTE-safe)
+//  6. ResolveAll — patch tất cả hooks
 // ═══════════════════════════════════════════════════════════
 static void ResolveAll() {
-    LOGI("=== Resolve START (MethodInfo patch, FallCond+CancelCond) ===");
+    LOGI("=== ResolveAll START ===");
 
-    void* klass = GetClass("Kar98k.IAP.Kunpo", "Kunpo_IAP");
-    if (!klass) { LOGE("Kunpo_IAP NOT FOUND"); return; }
+    // --- A. GManager_IAP_Hw::BuyProduct(1) → PatchMethodPointer ---
+    {
+        void* klass = FindClassAnywhere("GManager_IAP_Hw");
+        if (klass) {
+            void* mi = FindMethod(klass, "BuyProduct", 1);
+            if (mi) PatchMethodPointer(mi, (void*)h_IAPBuyProduct, (void**)&o_IAPBuyProduct,
+                                       "GManager_IAP_Hw::BuyProduct");
+            else LOGE("GManager_IAP_Hw::BuyProduct(1) NOT FOUND");
+        } else LOGE("GManager_IAP_Hw class NOT FOUND");
+    }
 
-    void* m_fall = FindMethod(klass, "FallCondition", 1);
-    if (m_fall) PatchMethodPointer(m_fall, (void*)h_FallCondition, (void**)&o_FallCondition, "FallCondition");
-    else LOGE("FindMethod FallCondition FAIL");
+    // --- GPay.AddGoodsId MethodInfo (để gọi qua il2cpp_runtime_invoke) ---
+    {
+        void* klass = FindClassAnywhere("GPay");
+        if (klass) {
+            g_mi_AddGoodsId = FindMethod(klass, "AddGoodsId", 2);
+            if (g_mi_AddGoodsId)
+                LOGI("GPay.AddGoodsId MethodInfo=%p fnPtr=%p", g_mi_AddGoodsId, *(void**)g_mi_AddGoodsId);
+            else LOGE("GPay.AddGoodsId(2) NOT FOUND");
+        } else LOGE("GPay class NOT FOUND");
+    }
 
-    void* m_cancel = FindMethod(klass, "CancelCondition", 1);
-    if (m_cancel) PatchMethodPointer(m_cancel, (void*)h_CancelCondition, (void**)&o_CancelCondition, "CancelCondition");
-    else LOGE("FindMethod CancelCondition FAIL");
+    // --- B. GPay::CountById(1) → PatchMethodPointer ---
+    {
+        void* klass = FindClassAnywhere("GPay");
+        if (klass) {
+            void* mi = FindMethod(klass, "CountById", 1);
+            if (mi) PatchMethodPointer(mi, (void*)h_CountById, (void**)&o_CountById,
+                                       "GPay::CountById");
+            else LOGE("GPay::CountById(1) NOT FOUND");
+        }
+    }
+
+    // --- C. Kunpo_IAP::FallCondition + CancelCondition → PatchMethodPointer ---
+    {
+        void* klass = GetClass("Kar98k.IAP.Kunpo", "Kunpo_IAP");
+        if (klass) {
+            void* m_fall = FindMethod(klass, "FallCondition", 1);
+            if (m_fall) PatchMethodPointer(m_fall, (void*)h_FallCondition, (void**)&o_FallCondition,
+                                           "Kunpo_IAP::FallCondition");
+            else LOGE("Kunpo_IAP::FallCondition(1) NOT FOUND");
+
+            void* m_cancel = FindMethod(klass, "CancelCondition", 1);
+            if (m_cancel) PatchMethodPointer(m_cancel, (void*)h_CancelCondition, (void**)&o_CancelCondition,
+                                             "Kunpo_IAP::CancelCondition");
+            else LOGE("Kunpo_IAP::CancelCondition(1) NOT FOUND");
+        } else LOGE("Kunpo_IAP class NOT FOUND");
+    }
+
+    // --- D. Kunpo_IAP::SendAward() → T_HOOK (UNIQUE address) ---
+    T_HOOK("Kar98k.IAP.Kunpo", "Kunpo_IAP", "SendAward", 0, SendAward);
 
     TraceReport();
-    LOGI("=== Resolve DONE ===");
+    LOGI("=== ResolveAll DONE ===");
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -384,7 +472,7 @@ Java_com_android_support_Main_CheckOverlayPermission(JNIEnv*, jclass, jobject) {
 
 __attribute__((constructor))
 void l_m() {
-    LOGI(".so injected (TEST14 - FallCondition + MethodInfo patch)");
+    LOGI(".so injected (FreeShop: BuyProduct+AddGoodsId+CountById)");
     pthread_t ptid;
     pthread_create(&ptid, nullptr, h_t, nullptr);
 }
