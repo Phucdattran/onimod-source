@@ -321,8 +321,11 @@ static void ResolveAll() {
     // [1] Free Shop
     // Chặn spinner: block client_show_dialog khi Free Shop bật
     T_HOOK("", "IAPManager", "client_show_dialog", 2, client_show_dialog);
-    // Cấp items: ReplenishPurchase (local, không server)
-    T_HOOK("", "IAPManager", "ReplenishPurchase", 1, ReplenishPurchase);
+    // Cache ReplenishPurchase để gọi trực tiếp (không hook, chỉ lấy địa chỉ)
+    { void* a = MethodAddr("", "IAPManager", "ReplenishPurchase", 1);
+      if (a) { o_ReplenishPurchase = (decltype(o_ReplenishPurchase))a;
+               LOGI("ReplenishPurchase cached: %p", a); }
+      else     LOGE("ReplenishPurchase NOT FOUND"); }
     // Chặn Google Pay dialog: hook BuyProduct
     T_HOOK("", "IAPManager", "BuyProduct", 2, BuyProduct);
 
