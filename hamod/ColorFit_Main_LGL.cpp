@@ -271,22 +271,20 @@ void h_BuyProduct(void* self, void* productId, uint32_t goodId, void* mi) {
     if (g_freeShop) {
         LOGI("FreeShop: chan BuyProduct goodId=%u", goodId);
 
-        // ReplenishPurchase: cấp đồ trực tiếp (local, KHÔNG network)
-        // Đây là method cuối cùng trong flow mua hàng — xử lý hoàn toàn client-side
-        if (g_fn_replenish && self && productId) {
-            LOGI("FreeShop: goi ReplenishPurchase...");
+        // client_request_success: completion callback cuối của purchase flow
+        // dismiss UI spinner + trigger grant items (gọi ReplenishPurchase nội bộ)
+        if (g_fn_clientSuccess && self && productId) {
+            LOGI("FreeShop: goi client_request_success goodId=%u...", goodId);
+            g_fn_clientSuccess(self, productId, goodId, nullptr);
+            LOGI("FreeShop: client_request_success xong");
+        } else if (g_fn_replenish && self && productId) {
+            // fallback: ReplenishPurchase trực tiếp
+            LOGI("FreeShop: fallback ReplenishPurchase...");
             g_fn_replenish(self, productId, nullptr);
             LOGI("FreeShop: ReplenishPurchase xong");
         } else {
-            // fallback: client_request_success
-            if (g_fn_clientSuccess && self && productId) {
-                LOGI("FreeShop: fallback client_request_success...");
-                g_fn_clientSuccess(self, productId, goodId, nullptr);
-                LOGI("FreeShop: client_request_success xong");
-            } else {
-                LOGE("FreeShop: KHONG CO CACHE! replenish=%p clientSucc=%p self=%p pid=%p",
-                     (void*)g_fn_replenish, (void*)g_fn_clientSuccess, self, productId);
-            }
+            LOGE("FreeShop: KHONG CO CACHE! clientSucc=%p replenish=%p self=%p pid=%p",
+                 (void*)g_fn_clientSuccess, (void*)g_fn_replenish, self, productId);
         }
 
         return;  // không gọi gốc = không hiện dialog Google Pay
@@ -329,22 +327,22 @@ static void ResolveAll() {
     // Cache các method private của IAPManager
     void* iapKlass = FindClassAnywhere("IAPManager");
     if (iapKlass) {
-        // ReplenishPurchase: 1 param (string) — cấp đồ trực tiếp, local
-        void* m = FindMethod(iapKlass, "ReplenishPurchase", 1);
-        if (m) {
-            g_fn_replenish = (t_ReplenishPurchase) MethodFnPtr(m);
-            LOGI("ReplenishPurchase cached: %p", (void*)g_fn_replenish);
-        } else {
-            LOGE("ReplenishPurchase NOT FOUND (1 param)");
-        }
-
-        // client_request_success: 2 params (string, uint) — fallback
-        m = FindMethod(iapKlass, "client_request_success", 2);
+        // client_request_success: 2 params (string, uint) — completion callback, dismiss spinner
+        void* m = FindMethod(iapKlass, "client_request_success", 2);
         if (m) {
             g_fn_clientSuccess = (t_client_request_success) MethodFnPtr(m);
             LOGI("client_request_success cached: %p", (void*)g_fn_clientSuccess);
         } else {
             LOGE("client_request_success NOT FOUND (2 params)");
+        }
+
+        // ReplenishPurchase: 1 param (string) — fallback
+        m = FindMethod(iapKlass, "ReplenishPurchase", 1);
+        if (m) {
+            g_fn_replenish = (t_ReplenishPurchase) MethodFnPtr(m);
+            LOGI("ReplenishPurchase cached: %p", (void*)g_fn_replenish);
+        } else {
+            LOGE("ReplenishPurchase NOT FOUND (1 param)");
         }
     } else {
         LOGE("IAPManager class NOT FOUND");
