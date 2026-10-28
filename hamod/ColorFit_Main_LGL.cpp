@@ -261,15 +261,23 @@ static void ApplySpeed() {
 void (*o_client_show_dialog)(void*, void*, uint32_t, void*) = nullptr;
 void h_client_show_dialog(void* self, void* productId, uint32_t goodId, void* mi) {
     T_COUNT(client_show_dialog);
-    if (g_freeShop) return;  // chặn spinner khi Free Shop bật
+    LOGI("client_show_dialog: self=%p freeShop=%d", self, (int)g_freeShop);
+    if (g_freeShop) {
+        LOGI("client_show_dialog: BLOCKED (free shop)");
+        return;
+    }
     if (o_client_show_dialog) o_client_show_dialog(self, productId, goodId, mi);
 }
+
+// client_request_success — dismiss spinner + complete purchase
+// dump: private void client_request_success(string productId, uint goodId) — instance, 2 params
+void (*o_client_request_success)(void*, void*, uint32_t, void*) = nullptr;
 
 // ReplenishPurchase — cấp items trực tiếp (local, không qua server)
 // dump: public void ReplenishPurchase(string productId) — instance, 1 param
 void (*o_ReplenishPurchase)(void*, void*, void*) = nullptr;
 
-// BuyProduct — khi Free Shop bật: gọi ReplenishPurchase trực tiếp, không Google Pay
+// BuyProduct — khi Free Shop bật: gọi ReplenishPurchase + dismiss spinner
 // dump: public void BuyProduct(string productId, uint goodId) — instance, 2 params
 void (*o_BuyProduct)(void*, void*, uint32_t, void*) = nullptr;
 void h_BuyProduct(void* self, void* productId, uint32_t goodId, void* mi) {
@@ -277,6 +285,7 @@ void h_BuyProduct(void* self, void* productId, uint32_t goodId, void* mi) {
     LOGI("BuyProduct: self=%p pid=%p goodId=%u freeShop=%d",
          self, productId, goodId, (int)g_freeShop);
     if (g_freeShop) {
+        // Bước 1: cấp items local (không qua server/Google Play)
         if (o_ReplenishPurchase && self && productId) {
             LOGI("FreeShop: goi ReplenishPurchase");
             o_ReplenishPurchase(self, productId, nullptr);
@@ -284,7 +293,20 @@ void h_BuyProduct(void* self, void* productId, uint32_t goodId, void* mi) {
         } else {
             LOGE("FreeShop: ReplenishPurchase NULL!");
         }
-        return;  // không gọi gốc = không Google Pay, không spinner
+        // Bước 2: dismiss spinner bằng client_request_success
+        if (o_client_request_success && self && productId) {
+            // Ghi order_Id (0x18) để method không return sớm vì null check
+            if (il2cpp_string_new) {
+                *(void**)((uintptr_t)self + 0x18) = il2cpp_string_new("FREE");
+                *(uint32_t*)((uintptr_t)self + 0x20) = goodId;
+            }
+            LOGI("FreeShop: goi client_request_success de dismiss spinner");
+            o_client_request_success(self, productId, goodId, nullptr);
+            LOGI("FreeShop: client_request_success xong");
+        } else {
+            LOGE("FreeShop: client_request_success NULL (spinner bi ket)!");
+        }
+        return;  // không gọi gốc = không Google Pay
     }
     if (o_BuyProduct) o_BuyProduct(self, productId, goodId, mi);
 }
@@ -319,9 +341,14 @@ static void ResolveAll() {
     if (o_getTS) g_gameScale = o_getTS(nullptr);
 
     // [1] Free Shop
-    // Chặn spinner: block client_show_dialog khi Free Shop bật
+    // Chặn spinner nếu gọi từ trong BuyProduct
     T_HOOK("", "IAPManager", "client_show_dialog", 2, client_show_dialog);
-    // Cache ReplenishPurchase để gọi trực tiếp (không hook, chỉ lấy địa chỉ)
+    // Cache client_request_success để dismiss spinner sau khi free buy
+    { void* a = MethodAddr("", "IAPManager", "client_request_success", 2);
+      if (a) { o_client_request_success = (decltype(o_client_request_success))a;
+               LOGI("client_request_success cached: %p", a); }
+      else     LOGE("client_request_success NOT FOUND"); }
+    // Cache ReplenishPurchase để gọi trực tiếp (cấp items local)
     { void* a = MethodAddr("", "IAPManager", "ReplenishPurchase", 1);
       if (a) { o_ReplenishPurchase = (decltype(o_ReplenishPurchase))a;
                LOGI("ReplenishPurchase cached: %p", a); }
