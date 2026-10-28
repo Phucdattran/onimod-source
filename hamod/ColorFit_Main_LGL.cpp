@@ -335,8 +335,6 @@ static void ResolveAll() {
 
     TraceReport();
     LOGI("=== Resolve DONE ===");
-    LOGI("Cache: replenish=%p clientSuccess=%p",
-         (void*)g_fn_replenish, (void*)g_fn_clientSuccess);
 }
 
 // ═══════════════════════════════════════════════════════════
