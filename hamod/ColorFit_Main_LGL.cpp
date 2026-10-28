@@ -222,14 +222,9 @@ template <typename T> static inline T& Field(void* obj, int off) {
 static float g_speed    = 1.0f;   // [0] Speed (SeekBar)
 static bool  g_freeShop = false;  // [1] Free Shop
 
-// IAPManager cached methods
-// dump: private void client_request_success(string product, uint goodId)
-typedef void (*t_client_request_success)(void* self, void* productId, uint32_t goodId, void* mi);
-static t_client_request_success g_fn_clientSuccess = nullptr;
-
-// dump: public void ReplenishPurchase(string productId)
-typedef void (*t_ReplenishPurchase)(void* self, void* productId, void* mi);
-static t_ReplenishPurchase g_fn_replenish = nullptr;
+// IAPManager fields (from dump.cs):
+//   private string order_Id; // 0x18
+//   private uint   good_Id;  // 0x20
 
 // ═══════════════════════════════════════════════════════════
 //  5. SPEED
@@ -261,7 +256,15 @@ static void ApplySpeed() {
 //  6. HOOKS
 // ═══════════════════════════════════════════════════════════
 
-// BuyProduct — khi Free Shop bật: skip Google Pay, cấp đồ trực tiếp
+// client_request_success — pass-through hook để T_COUNT đếm + lấy o_
+// dump: private void client_request_success(string product, uint goodId) — instance, 2 params
+void (*o_client_request_success)(void*, void*, uint32_t, void*) = nullptr;
+void h_client_request_success(void* self, void* productId, uint32_t goodId, void* mi) {
+    T_COUNT(client_request_success);
+    if (o_client_request_success) o_client_request_success(self, productId, goodId, mi);
+}
+
+// BuyProduct — khi Free Shop bật: set state fields rồi gọi client_request_success trực tiếp
 // dump: public void BuyProduct(string productId, uint goodId) — instance, 2 params
 void (*o_BuyProduct)(void*, void*, uint32_t, void*) = nullptr;
 void h_BuyProduct(void* self, void* productId, uint32_t goodId, void* mi) {
@@ -269,24 +272,23 @@ void h_BuyProduct(void* self, void* productId, uint32_t goodId, void* mi) {
     LOGI("BuyProduct: self=%p pid=%p goodId=%u freeShop=%d",
          self, productId, goodId, (int)g_freeShop);
     if (g_freeShop) {
-        LOGI("FreeShop: chan BuyProduct goodId=%u", goodId);
+        LOGI("FreeShop: set IAPManager state truoc khi goi client_request_success");
 
-        // client_request_success: completion callback cuối của purchase flow
-        // dismiss UI spinner + trigger grant items (gọi ReplenishPurchase nội bộ)
-        if (g_fn_clientSuccess && self && productId) {
-            LOGI("FreeShop: goi client_request_success goodId=%u...", goodId);
-            g_fn_clientSuccess(self, productId, goodId, nullptr);
-            LOGI("FreeShop: client_request_success xong");
-        } else if (g_fn_replenish && self && productId) {
-            // fallback: ReplenishPurchase trực tiếp
-            LOGI("FreeShop: fallback ReplenishPurchase...");
-            g_fn_replenish(self, productId, nullptr);
-            LOGI("FreeShop: ReplenishPurchase xong");
-        } else {
-            LOGE("FreeShop: KHONG CO CACHE! clientSucc=%p replenish=%p self=%p pid=%p",
-                 (void*)g_fn_clientSuccess, (void*)g_fn_replenish, self, productId);
+        // Set order_Id @ 0x18 và good_Id @ 0x20 (dump.cs fields)
+        // client_request_success kiểm tra order_Id != null, nếu null thì return sớm
+        if (self && il2cpp_string_new) {
+            *(void**)((uintptr_t)self + 0x18) = il2cpp_string_new("FREE");
+            *(uint32_t*)((uintptr_t)self + 0x20) = goodId;
+            LOGI("FreeShop: order_Id=FREE good_Id=%u", goodId);
         }
 
+        if (o_client_request_success && self && productId) {
+            LOGI("FreeShop: calling client_request_success goodId=%u", goodId);
+            o_client_request_success(self, productId, goodId, nullptr);
+            LOGI("FreeShop: xong");
+        } else {
+            LOGE("FreeShop: o_client_request_success NULL! hook co the bi loi");
+        }
         return;  // không gọi gốc = không hiện dialog Google Pay
     }
     if (o_BuyProduct) o_BuyProduct(self, productId, goodId, mi);
@@ -321,32 +323,11 @@ static void ResolveAll() {
     T_HOOK("UnityEngine", "Time", "set_timeScale", 1, setTS);
     if (o_getTS) g_gameScale = o_getTS(nullptr);
 
-    // [1] Free Shop — hook BuyProduct để chặn dialog Google Pay
+    // [1] Free Shop
+    // Hook client_request_success (private, 2 params) để có o_ + T_COUNT đếm
+    T_HOOK("", "IAPManager", "client_request_success", 2, client_request_success);
+    // Hook BuyProduct để chặn dialog Google Pay
     T_HOOK("", "IAPManager", "BuyProduct", 2, BuyProduct);
-
-    // Cache các method private của IAPManager
-    void* iapKlass = FindClassAnywhere("IAPManager");
-    if (iapKlass) {
-        // client_request_success: 2 params (string, uint) — completion callback, dismiss spinner
-        void* m = FindMethod(iapKlass, "client_request_success", 2);
-        if (m) {
-            g_fn_clientSuccess = (t_client_request_success) MethodFnPtr(m);
-            LOGI("client_request_success cached: %p", (void*)g_fn_clientSuccess);
-        } else {
-            LOGE("client_request_success NOT FOUND (2 params)");
-        }
-
-        // ReplenishPurchase: 1 param (string) — fallback
-        m = FindMethod(iapKlass, "ReplenishPurchase", 1);
-        if (m) {
-            g_fn_replenish = (t_ReplenishPurchase) MethodFnPtr(m);
-            LOGI("ReplenishPurchase cached: %p", (void*)g_fn_replenish);
-        } else {
-            LOGE("ReplenishPurchase NOT FOUND (1 param)");
-        }
-    } else {
-        LOGE("IAPManager class NOT FOUND");
-    }
 
     // ShopGoodsLogic — UI hiện nút gói free
     T_HOOK("", "ShopGoodsLogic", "IsFreePackageClaimble", 0, IsFreePackageClaimble);
