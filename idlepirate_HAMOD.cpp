@@ -13,7 +13,7 @@
 #include <android/log.h>
 
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, "HAMOD_RADAR", __VA_ARGS__)
-#define HAMOD_BUILD_ID "IDLEPIRATE_UI_FINISH_20261102_R1"
+#define HAMOD_BUILD_ID "IDLEPIRATE_UI_FINISH_20261102_R2"
 
 // Target: com.limebolt.idlepirate (Idle Pirate Tycoon), AArch64.
 // Verified libMain.so GNU Build ID: 022a32a3e3a2955a9233457de6f0b3f3efbcb161.
@@ -150,12 +150,12 @@ void ApplyPatches(bool enable) {
         // ON
         // ============================================================
 
-        // ① PATCH_MAIN — TODO: purchasePack entry not identified in new binary.
-        //   fn@0x52BA08 is closest match by OFF-byte structure but has only 1 BL call;
-        //   lookup (old 0x73C8F4) and handler (old 0x73D334) prologues not found via delta.
-        //   BSS also moved from ~0xE698E8 range to 0xE7D270–0xEA98F0.
-        //   ON bytes require full recalculation before enabling.
-        //   Disable this block for safe anti-ban-only operation.
+        // ① PATCH_MAIN — purchasePack fn@0x54243C (string "purchasePack %d %s %d %s" → 0x2C0C73)
+        //   W4 = product_id; chain: BL1=0x74DBE4 (lookup), BL2=0x74CE48 (item desc), BL3=0x74D888 (grant)
+        //   32-byte frame to save BL1's W0 between BL1 and BL2 calls.
+        //   For W4 < 73 (free IDs): runs full grant chain and returns early.
+        //   For W4 >= 73 (paid IDs): B.GE → LDP+RET immediately (no IAB initiated).
+        PatchHexMemory(libMain_base, 0x54243C, "fd7bbea9fd0300917101249f0a0100542a0403e0e52d0894b90013e07c2a0894aa0003e1b94013e0092d0894fd7bc2a8d65f03c0d503201f");
 
         // ② PATCH_BR — 2 self-reporting cheat trips → unconditional branch
         PatchHexMemory(libMain_base, 0x99F4B8, "03000014"); // Flooz cheat trip (B.PL → B)
@@ -194,7 +194,8 @@ void ApplyPatches(bool enable) {
         // OFF
         // ============================================================
 
-        // ① PATCH_MAIN — skipped (not enabled above)
+        // ① PATCH_MAIN OFF — khôi phục purchasePack fn@0x54243C
+        PatchHexMemory(libMain_base, 0x54243C, "ff0302d1fd7b04a9f72b00f9f65706a9f44f07a9fd03019157d03bd5f50305aaf303042ae81640f9e10303aaf403022af60300aaa8831ff8");
 
         // ② PATCH_BR — khôi phục cheat trips
         PatchHexMemory(libMain_base, 0x99F4B8, "65000054");
