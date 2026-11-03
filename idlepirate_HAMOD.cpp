@@ -256,56 +256,38 @@ void *Doc_Config_Ngam(void *) {
         usleep(500000);
     }
 
-    char config_path[512];
-
+    // HAMOD: /data/data/com.hamod.vn/files/mods/com.limebolt.idlepirate/<feat_idx>
+    // MODMENU_LOG_DIR được HAMOD set = /data/data/com.hamod.vn/files
     const char* log_dir = getenv("MODMENU_LOG_DIR");
-
+    char base_dir[512];
     if (log_dir != NULL) {
-        snprintf(
-            config_path,
-            sizeof(config_path),
-            "%s/mods/config_com.limebolt.idlepirate.txt",
-            log_dir
-        );
+        snprintf(base_dir, sizeof(base_dir),
+            "%s/mods/com.limebolt.idlepirate", log_dir);
     } else {
-        strcpy(
-            config_path,
-            "/data/data/menu.nextgen.launcher/files/mods/"
-            "config_com.limebolt.idlepirate.txt"
-        );
+        strcpy(base_dir,
+            "/data/data/com.hamod.vn/files/mods/com.limebolt.idlepirate");
     }
+
+    char path0[600];
+    snprintf(path0, sizeof(path0), "%s/0", base_dir);
 
     int last_free_packs = -1;
 
     while (true) {
-        FILE *file = fopen(config_path, "r");
-
-        if (file != NULL) {
-            float f1 = 0;
-
-            int read_count = fscanf(file, "%f", &f1);
-
-            if (read_count >= 1) {
-                int current_free_packs = (int)f1;
-
-                if (current_free_packs != last_free_packs) {
-
-                    LOGD(
-                        "[+] MENU UPDATE: Free Packs = %d",
-                        current_free_packs
-                    );
-
-                    v_free_packs =
-                        (current_free_packs == 1);
-
+        // Feature 0: Free Packs
+        FILE *f0 = fopen(path0, "r");
+        if (f0 != NULL) {
+            float v = 0;
+            if (fscanf(f0, "%f", &v) == 1) {
+                int cur = (int)v;
+                if (cur != last_free_packs) {
+                    LOGD("[+] HAMOD UPDATE: Free Packs = %d", cur);
+                    v_free_packs = (cur == 1);
                     ApplyPatches(v_free_packs);
-
-                    last_free_packs =
-                        current_free_packs;
+                    last_free_packs = cur;
                 }
             }
-
-            fclose(file);
+            fclose(f0);
         }
 
         usleep(500000);
