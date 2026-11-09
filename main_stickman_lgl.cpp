@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <inttypes.h>
 #include <link.h>
+#include <sys/mman.h>
 #include <android/log.h>
 
 #include "Includes/obfuscate.h"
@@ -201,6 +202,27 @@ static bool DoHook(void* addr, void* hook, void** orig, const char* name) {
     return false;
 }
 
+// Patch ARM64 absolute jump (không dùng Dobby) — dùng khi Dobby crash do ADRP relocation
+// LDR X17, +8 (0x58000051) ; BR X17 (0xD61F0220) ; [64-bit target address]
+static bool PatchDirectJump(void* addr, void* target) {
+    if (!addr || !target) return false;
+    uintptr_t page = (uintptr_t)addr & ~0xFFFUL;
+    if (mprotect((void*)page, 0x2000, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
+        LOGE("PatchJump: mprotect FAIL @ %p", addr);
+        return false;
+    }
+    uint32_t* p = (uint32_t*)addr;
+    uintptr_t t = (uintptr_t)target;
+    p[0] = 0x58000051u; // LDR X17, +8
+    p[1] = 0xD61F0220u; // BR X17
+    p[2] = (uint32_t)(t & 0xFFFFFFFFu);
+    p[3] = (uint32_t)(t >> 32);
+    __builtin___clear_cache((char*)addr, (char*)addr + 16);
+    mprotect((void*)page, 0x2000, PROT_READ | PROT_EXEC);
+    LOGI("PatchJump: OK @ %p -> %p", addr, target);
+    return true;
+}
+
 template <typename T> static inline T& Field(void* obj, int off) {
     return *(T*)((uintptr_t)obj + off);
 }
@@ -289,8 +311,14 @@ static void ResolveAll() {
     // [1] Bất Tử — PlayerHealth.TakeDamage(double)
     T_HOOK("Combat.Player.Components", "PlayerHealth", "TakeDamage", 1, PlayerTakeDmg);
 
-    // [2] Dame — EnemyHealth.$rcC(double): ghi field trực tiếp, KHÔNG gọi o_rcC
-    T_HOOK("Combat.Enemy.Components", "EnemyHealth", "$rcC", 1, rcC);
+    // [2] Dame — patch trực tiếp (Dobby crash do ADRP relocation khi hook $rcC)
+    {
+        void* rcCAddr = MethodAddr("Combat.Enemy.Components", "EnemyHealth", "$rcC", 1);
+        if (PatchDirectJump(rcCAddr, (void*)h_rcC))
+            LOGI("Dame patch: OK");
+        else
+            LOGE("Dame patch: FAIL");
+    }
 
     TraceReport();
     LOGI("=== Resolve DONE ===");
