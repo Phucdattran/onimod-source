@@ -210,6 +210,7 @@ template <typename T> static inline T& Field(void* obj, int off) {
 // ═══════════════════════════════════════════════════════════
 static float  g_speed  = 1.0f;  // [0] Speed
 static bool   g_god    = false; // [1] Bất Tử
+static bool   g_dame   = false; // [2] Dame 1-phát-chết
 
 // ═══════════════════════════════════════════════════════════
 //  5. SPEED
@@ -248,7 +249,34 @@ void h_PlayerTakeDmg(void* self, double damage, void* mi) {
 }
 
 // ═══════════════════════════════════════════════════════════
-//  7. GẮN HOOK
+//  7. DAME — EnemyHealth.$rcC(double)
+//     Fields từ dump.cs (Combat.Enemy.Components.EnemyHealth):
+//       $IAA @ 0x28 = System.Double (current HP)
+//       $iAA @ 0x20 = System.Double (max HP)
+//       $xG  @ 0x30 = System.Boolean (isDead)
+//     KHÔNG gọi o_rcC → tránh crash trampoline ADRP trong event dispatch
+// ═══════════════════════════════════════════════════════════
+typedef void (*t_rcC)(void* self, double damage, void* mi);
+static t_rcC o_rcC = nullptr;
+
+void h_rcC(void* self, double damage, void* mi) {
+    T_COUNT(rcC);
+    if (!self) return;
+    if (g_dame) {
+        Field<double>(self, 0x28) = 0.0;
+        Field<bool>(self, 0x30)   = true;
+        LOGI("Dame: 1-shot (self=%p dmg=%.1f)", self, damage);
+        return;
+    }
+    // Dame OFF: áp dụng damage thủ công, tránh gọi original (crash trampoline)
+    double* pHP = &Field<double>(self, 0x28);
+    *pHP -= damage;
+    if (*pHP < 0.0) *pHP = 0.0;
+    if (*pHP <= 0.0) Field<bool>(self, 0x30) = true;
+}
+
+// ═══════════════════════════════════════════════════════════
+//  8. GẮN HOOK
 // ═══════════════════════════════════════════════════════════
 static void ResolveAll() {
     LOGI("=== Resolve START ===");
@@ -258,12 +286,11 @@ static void ResolveAll() {
     T_HOOK("UnityEngine", "Time", "set_timeScale", 1, setTS);
     if (o_getTS) g_gameScale = o_getTS(nullptr);
 
-    // [1] Bất Tử — PlayerHealth.TakeDamage(double) 1 tham số
+    // [1] Bất Tử — PlayerHealth.TakeDamage(double)
     T_HOOK("Combat.Player.Components", "PlayerHealth", "TakeDamage", 1, PlayerTakeDmg);
 
-    // [2] Dame: KHONG the hook -- EnemyHealth dung ObscuredDouble (anti-cheat)
-    // Dobby trampoline copy PC-relative instruction → tinh sai pointer → crash 0x135
-    // Ca $rcC, get_Max, get_Current deu gap cung loi nay
+    // [2] Dame — EnemyHealth.$rcC(double): ghi field trực tiếp, KHÔNG gọi o_rcC
+    T_HOOK("Combat.Enemy.Components", "EnemyHealth", "$rcC", 1, rcC);
 
     TraceReport();
     LOGI("=== Resolve DONE ===");
@@ -275,8 +302,9 @@ static void ResolveAll() {
 jobjectArray GetFeatureList(JNIEnv* env, jobject) {
     const char* features[] = {
         OBFUSCATE("Category_" GAME_NAME),
-        OBFUSCATE("0_SeekBar_⚡ Tốc Độ Game_1_10"),
-        OBFUSCATE("1_Toggle_\U0001F6E1 Bất Tử"),
+        OBFUSCATE("0_SeekBar_\xe2\x9a\xa1 Toc Do Game_1_10"),
+        OBFUSCATE("1_Toggle_\xf0\x9f\x9b\xa1 Bat Tu"),
+        OBFUSCATE("2_Toggle_\xe2\x9a\x94 Dame 1-Phat-Chet"),
     };
     int total = sizeof(features) / sizeof(features[0]);
     jobjectArray ret = env->NewObjectArray(
@@ -301,6 +329,10 @@ void Changes(JNIEnv* env, jclass, jobject,
         case 1:
             g_god = boolean;
             LOGI("BatTu: %s", g_god ? "BAT" : "TAT");
+            break;
+        case 2:
+            g_dame = boolean;
+            LOGI("Dame: %s", g_dame ? "BAT (1-phat-chet)" : "TAT");
             break;
     }
 }
