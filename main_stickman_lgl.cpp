@@ -208,9 +208,8 @@ template <typename T> static inline T& Field(void* obj, int off) {
 // ═══════════════════════════════════════════════════════════
 //  4. TRẠNG THÁI
 // ═══════════════════════════════════════════════════════════
-static float  g_speed   = 1.0f;  // [0] Speed
-static bool   g_god     = false; // [1] Bất Tử
-static bool   g_onehit  = false; // [2] Sát Thương Mạnh (1-hit)
+static float  g_speed  = 1.0f;  // [0] Speed
+static bool   g_god    = false; // [1] Bất Tử
 
 // ═══════════════════════════════════════════════════════════
 //  5. SPEED
@@ -249,22 +248,7 @@ void h_PlayerTakeDmg(void* self, double damage, void* mi) {
 }
 
 // ═══════════════════════════════════════════════════════════
-//  7. SÁT THƯƠNG MẠNH — EnemyHealth.get_Max()
-//     Combat.Enemy.Components.EnemyHealth
-//     Trả về 1.0 HP max → enemy chỉ cần 1 hit để chết
-//     Dùng get_Max (tên sạch) thay vì $rcC (obfuscated, trampoline bị lỗi)
-// ═══════════════════════════════════════════════════════════
-typedef double (*t_EnemyGetMax)(void* self, void* mi);
-static t_EnemyGetMax o_EnemyGetMax = nullptr;
-
-double h_EnemyGetMax(void* self, void* mi) {
-    T_COUNT(EnemyGetMax);
-    if (g_onehit && self) return 1.0;
-    return o_EnemyGetMax ? o_EnemyGetMax(self, mi) : 1.0;
-}
-
-// ═══════════════════════════════════════════════════════════
-//  8. GẮN HOOK
+//  7. GẮN HOOK
 // ═══════════════════════════════════════════════════════════
 static void ResolveAll() {
     LOGI("=== Resolve START ===");
@@ -277,8 +261,9 @@ static void ResolveAll() {
     // [1] Bất Tử — PlayerHealth.TakeDamage(double) 1 tham số
     T_HOOK("Combat.Player.Components", "PlayerHealth", "TakeDamage", 1, PlayerTakeDmg);
 
-    // [2] Sát Thương Mạnh — EnemyHealth.get_Max() trả về 1.0 HP max
-    T_HOOK("Combat.Enemy.Components", "EnemyHealth", "get_Max", 0, EnemyGetMax);
+    // [2] Dame: KHONG the hook -- EnemyHealth dung ObscuredDouble (anti-cheat)
+    // Dobby trampoline copy PC-relative instruction → tinh sai pointer → crash 0x135
+    // Ca $rcC, get_Max, get_Current deu gap cung loi nay
 
     TraceReport();
     LOGI("=== Resolve DONE ===");
@@ -292,7 +277,6 @@ jobjectArray GetFeatureList(JNIEnv* env, jobject) {
         OBFUSCATE("Category_" GAME_NAME),
         OBFUSCATE("0_SeekBar_⚡ Tốc Độ Game_1_10"),
         OBFUSCATE("1_Toggle_\U0001F6E1 Bất Tử"),
-        OBFUSCATE("2_Toggle_\U0001F4A5 S\xc3\xa1t Th\xc6\xb0\xe1\xbb\xa3ng M\xe1\xba\xa1nh"),
     };
     int total = sizeof(features) / sizeof(features[0]);
     jobjectArray ret = env->NewObjectArray(
@@ -317,10 +301,6 @@ void Changes(JNIEnv* env, jclass, jobject,
         case 1:
             g_god = boolean;
             LOGI("BatTu: %s", g_god ? "BAT" : "TAT");
-            break;
-        case 2:
-            g_onehit = boolean;
-            LOGI("SatThuongManh: %s", g_onehit ? "BAT" : "TAT");
             break;
     }
 }
