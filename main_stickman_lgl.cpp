@@ -208,9 +208,9 @@ template <typename T> static inline T& Field(void* obj, int off) {
 // ═══════════════════════════════════════════════════════════
 //  4. TRẠNG THÁI
 // ═══════════════════════════════════════════════════════════
-static float  g_speed  = 1.0f;   // [0] Speed
-static bool   g_god    = false;  // [1] Bất Tử
-static int    g_dmg    = 1;      // [2] Dame x N
+static float  g_speed   = 1.0f;  // [0] Speed
+static bool   g_god     = false; // [1] Bất Tử
+static bool   g_onehit  = false; // [2] Sát Thương Mạnh (1-hit)
 
 // ═══════════════════════════════════════════════════════════
 //  5. SPEED
@@ -249,18 +249,18 @@ void h_PlayerTakeDmg(void* self, double damage, void* mi) {
 }
 
 // ═══════════════════════════════════════════════════════════
-//  7. DAME x N — EnemyHealth.$rcC(double)
+//  7. SÁT THƯƠNG MẠNH — EnemyHealth.get_Max()
 //     Combat.Enemy.Components.EnemyHealth
-//     Nhân damage vào enemy lên g_dmg lần
-//     Lưu ý: tên "$rcC" là obfuscated — có thể thay đổi nếu game update
+//     Trả về 1.0 HP max → enemy chỉ cần 1 hit để chết
+//     Dùng get_Max (tên sạch) thay vì $rcC (obfuscated, trampoline bị lỗi)
 // ═══════════════════════════════════════════════════════════
-typedef void (*t_EnemyTakeDmg)(void* self, double damage, void* mi);
-static t_EnemyTakeDmg o_EnemyTakeDmg = nullptr;
+typedef double (*t_EnemyGetMax)(void* self, void* mi);
+static t_EnemyGetMax o_EnemyGetMax = nullptr;
 
-void h_EnemyTakeDmg(void* self, double damage, void* mi) {
-    T_COUNT(EnemyTakeDmg);
-    double finalDmg = (g_dmg > 1) ? damage * g_dmg : damage;
-    if (o_EnemyTakeDmg) o_EnemyTakeDmg(self, finalDmg, mi);
+double h_EnemyGetMax(void* self, void* mi) {
+    T_COUNT(EnemyGetMax);
+    if (g_onehit && self) return 1.0;
+    return o_EnemyGetMax ? o_EnemyGetMax(self, mi) : 1.0;
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -277,8 +277,8 @@ static void ResolveAll() {
     // [1] Bất Tử — PlayerHealth.TakeDamage(double) 1 tham số
     T_HOOK("Combat.Player.Components", "PlayerHealth", "TakeDamage", 1, PlayerTakeDmg);
 
-    // [2] Dame — EnemyHealth.$rcC(double) 1 tham số (obfuscated TakeDamage của enemy)
-    T_HOOK("Combat.Enemy.Components", "EnemyHealth", "$rcC", 1, EnemyTakeDmg);
+    // [2] Sát Thương Mạnh — EnemyHealth.get_Max() trả về 1.0 HP max
+    T_HOOK("Combat.Enemy.Components", "EnemyHealth", "get_Max", 0, EnemyGetMax);
 
     TraceReport();
     LOGI("=== Resolve DONE ===");
@@ -292,7 +292,7 @@ jobjectArray GetFeatureList(JNIEnv* env, jobject) {
         OBFUSCATE("Category_" GAME_NAME),
         OBFUSCATE("0_SeekBar_⚡ Tốc Độ Game_1_10"),
         OBFUSCATE("1_Toggle_\U0001F6E1 Bất Tử"),
-        OBFUSCATE("2_SeekBar_\U0001F4A5 Dame x N_1_20"),
+        OBFUSCATE("2_Toggle_\U0001F4A5 S\xc3\xa1t Th\xc6\xb0\xe1\xbb\xa3ng M\xe1\xba\xa1nh"),
     };
     int total = sizeof(features) / sizeof(features[0]);
     jobjectArray ret = env->NewObjectArray(
@@ -319,8 +319,8 @@ void Changes(JNIEnv* env, jclass, jobject,
             LOGI("BatTu: %s", g_god ? "BAT" : "TAT");
             break;
         case 2:
-            g_dmg = (value < 1) ? 1 : value;
-            LOGI("Dame: x%d", g_dmg);
+            g_onehit = boolean;
+            LOGI("SatThuongManh: %s", g_onehit ? "BAT" : "TAT");
             break;
     }
 }
