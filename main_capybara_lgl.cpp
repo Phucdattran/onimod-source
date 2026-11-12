@@ -1,6 +1,6 @@
 // ============================================================
 //  LGL MOD — com.yibu.CapybaraSurvivorGOGOGO v10.0.1
-//  Chuc nang: Speed (1-10x) + Bat Tu + Dame 1-Phat-Chet
+//  Chuc nang: Speed (1-10x) + Bat Tu + Dame 1-Phat-Chet + Free Shop
 // ============================================================
 
 #include <pthread.h>
@@ -163,9 +163,10 @@ template <typename T> static inline T& Field(void* obj, int off) {
 }
 
 // 4. TRANG THAI
-static float g_speed  = 1.0f;
-static bool  g_god    = false;
-static bool  g_dame   = false;
+static float g_speed     = 1.0f;
+static bool  g_god       = false;
+static bool  g_dame      = false;
+static bool  g_free_shop = false;
 
 // 5. SPEED — UnityEngine.Time
 // get_timeScale @ 0x4827FDC | set_timeScale @ 0x4828004
@@ -226,7 +227,47 @@ void h_CountTakeDamage(void* self, int64_t num, bool isCritical, bool markDamage
     HandleTakeDamage(o_CountTakeDamage,self,num,isCritical,markDamage,mi);
 }
 
-// 7. GAN HOOK
+// 7. FREE SHOP
+// 4 shop cell class, moi cai co Buy() kiem tra currency roi goi BuyItem().
+// Hook Buy() / BuyBtn_OnClick() -> goi BuyItem() thang, bo qua kiem tra tien.
+//   ActivShopCell.Buy()          @ 0x241A79C  -> BuyItem() @ 0x241AA08
+//   AsprintShopCell.Buy()        @ 0x2424270  -> BuyItem() @ 0x24244A8
+//   BlackMarketCell.Buy()        @ 0x24260F4  -> BuyItem() @ 0x24262EC
+//   ExchShopCellCom.BuyBtn_OnClick() @ 0x238E944 -> BuyItem() @ 0x238EB28
+
+typedef void (*t_ShopBuy)(void* self, void* mi);
+static t_ShopBuy fn_ActivBuyItem   = nullptr;
+static t_ShopBuy fn_AsprintBuyItem = nullptr;
+static t_ShopBuy fn_BlackBuyItem   = nullptr;
+static t_ShopBuy fn_ExchBuyItem    = nullptr;
+
+static t_ShopBuy o_ActivBuy   = nullptr;
+static t_ShopBuy o_AsprintBuy = nullptr;
+static t_ShopBuy o_BlackBuy   = nullptr;
+static t_ShopBuy o_ExchBuyBtn = nullptr;
+
+void h_ActivBuy(void* self, void* mi){
+    T_COUNT(ActivBuy);
+    if(g_free_shop && fn_ActivBuyItem && self){ fn_ActivBuyItem(self,nullptr); return; }
+    if(o_ActivBuy) o_ActivBuy(self,mi);
+}
+void h_AsprintBuy(void* self, void* mi){
+    T_COUNT(AsprintBuy);
+    if(g_free_shop && fn_AsprintBuyItem && self){ fn_AsprintBuyItem(self,nullptr); return; }
+    if(o_AsprintBuy) o_AsprintBuy(self,mi);
+}
+void h_BlackBuy(void* self, void* mi){
+    T_COUNT(BlackBuy);
+    if(g_free_shop && fn_BlackBuyItem && self){ fn_BlackBuyItem(self,nullptr); return; }
+    if(o_BlackBuy) o_BlackBuy(self,mi);
+}
+void h_ExchBuyBtn(void* self, void* mi){
+    T_COUNT(ExchBuyBtn);
+    if(g_free_shop && fn_ExchBuyItem && self){ fn_ExchBuyItem(self,nullptr); return; }
+    if(o_ExchBuyBtn) o_ExchBuyBtn(self,mi);
+}
+
+// 8. GAN HOOK
 static void ResolveAll(){
     LOGI("=== Resolve START ===");
     T_HOOK("UnityEngine","Time","get_timeScale",0,getTS);
@@ -236,17 +277,31 @@ static void ResolveAll(){
     T_HOOK("","Health","TakeDamage",3,TakeDamage);
     // CountHealth.TakeDamage(3) — subclass override, hook rieng
     T_HOOK("","CountHealth","TakeDamage",3,CountTakeDamage);
+    // Free Shop: cache BuyItem() roi hook Buy() cua tung shop cell class
+    {void* k=FindClassAnywhere("ActivShopCell");
+     if(k){void* m=FindMethod(k,"BuyItem",0);if(m)fn_ActivBuyItem=(t_ShopBuy)MethodFnPtr(m);LOGI("ActivBuyItem: %p",fn_ActivBuyItem);}
+     T_HOOK("","ActivShopCell","Buy",0,ActivBuy);}
+    {void* k=FindClassAnywhere("AsprintShopCell");
+     if(k){void* m=FindMethod(k,"BuyItem",0);if(m)fn_AsprintBuyItem=(t_ShopBuy)MethodFnPtr(m);LOGI("AsprintBuyItem: %p",fn_AsprintBuyItem);}
+     T_HOOK("","AsprintShopCell","Buy",0,AsprintBuy);}
+    {void* k=FindClassAnywhere("BlackMarketCell");
+     if(k){void* m=FindMethod(k,"BuyItem",0);if(m)fn_BlackBuyItem=(t_ShopBuy)MethodFnPtr(m);LOGI("BlackBuyItem: %p",fn_BlackBuyItem);}
+     T_HOOK("","BlackMarketCell","Buy",0,BlackBuy);}
+    {void* k=FindClassAnywhere("ExchShopCellCom");
+     if(k){void* m=FindMethod(k,"BuyItem",0);if(m)fn_ExchBuyItem=(t_ShopBuy)MethodFnPtr(m);LOGI("ExchBuyItem: %p",fn_ExchBuyItem);}
+     T_HOOK("","ExchShopCellCom","BuyBtn_OnClick",0,ExchBuyBtn);}
     TraceReport();
     LOGI("=== Resolve DONE ===");
 }
 
-// 8. MENU
+// 9. MENU
 jobjectArray GetFeatureList(JNIEnv* env,jobject){
     const char* features[]={
         OBFUSCATE("Category_" GAME_NAME),
         OBFUSCATE("0_SeekBar_\xe2\x9a\xa1 Toc Do Game_1_10"),
         OBFUSCATE("1_Toggle_\xf0\x9f\x9b\xa1 Bat Tu"),
         OBFUSCATE("2_Toggle_\xe2\x9a\x94 Dame 1-Phat-Chet"),
+        OBFUSCATE("3_Toggle_\xf0\x9f\x9b\x92 Free Shop"),
     };
     int total=sizeof(features)/sizeof(features[0]);
     jobjectArray ret=env->NewObjectArray(total,env->FindClass("java/lang/String"),env->NewStringUTF(""));
@@ -260,10 +315,11 @@ void Changes(JNIEnv* env,jclass,jobject,jint featNum,jstring featName,jint value
         case 0: g_speed=(value<1)?1.0f:(float)value; ApplySpeed(); break;
         case 1: g_god=boolean; LOGI("BatTu: %s",g_god?"BAT":"TAT"); break;
         case 2: g_dame=boolean; LOGI("Dame: %s",g_dame?"BAT":"TAT"); break;
+        case 3: g_free_shop=boolean; LOGI("FreeShop: %s",g_free_shop?"BAT":"TAT"); break;
     }
 }
 
-// 9. KHOI TAO
+// 10. KHOI TAO
 static volatile bool g_il2cpp_ready=false;
 static int (*o_il2cpp_init)(const char*)=nullptr;
 static int h_il2cpp_init(const char* domain_name){
