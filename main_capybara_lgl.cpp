@@ -1,6 +1,6 @@
 // ============================================================
 //  LGL MOD — com.yibu.CapybaraSurvivorGOGOGO v10.0.1
-//  Chuc nang: Speed (1-10x) + Bat Tu + Dame xN + Free Shop
+//  Chuc nang: Speed (1-10x) + Dame xN + Free Shop
 // ============================================================
 
 #include <pthread.h>
@@ -41,6 +41,8 @@ const char* (*il2cpp_class_get_name)(void*)                                 = nu
 void*       (*il2cpp_class_get_methods)(void*, void**)                      = nullptr;
 const char* (*il2cpp_method_get_name)(void*)                                = nullptr;
 uint32_t    (*il2cpp_method_get_param_count)(void*)                         = nullptr;
+void*       (*il2cpp_object_get_class)(void*)                               = nullptr;
+void*       (*il2cpp_runtime_invoke)(void*, void*, void**, void**)           = nullptr;
 
 // 2. ELF SYMBOL + IL2CPP LOADER
 static const ElfW(Phdr)* g_il2cpp_phdr  = nullptr;
@@ -94,6 +96,7 @@ bool InitIL2CppAPI() {
     LOAD(il2cpp_class_from_name); LOAD(il2cpp_class_get_name);
     LOAD(il2cpp_class_get_methods); LOAD(il2cpp_method_get_name);
     LOAD(il2cpp_method_get_param_count);
+    LOAD(il2cpp_object_get_class); LOAD(il2cpp_runtime_invoke);
     #undef LOAD
     bool ok = il2cpp_domain_get && il2cpp_domain_get_assemblies && il2cpp_assembly_get_image &&
               il2cpp_class_from_name && il2cpp_class_get_methods && il2cpp_method_get_name;
@@ -164,7 +167,6 @@ template <typename T> static inline T& Field(void* obj, int off) {
 
 // 4. TRANG THAI
 static float g_speed     = 1.0f;
-static bool  g_god       = false;
 static int   g_dmg_mult  = 1;    // 1=off, 5/10/20=nhan sat thuong player
 static bool  g_free_shop = false;
 
@@ -182,27 +184,7 @@ static void ApplySpeed(){
     LOGI("Speed x%.0f applied",g_speed);
 }
 
-// 6. HEALTH.TAKEDAMAGE — chi dung cho God Mode
-// Health.TakeDamage(Int64 num, Boolean isCritical, Boolean markDamage) @ 0x22E7744
-// Fields (du dump.cs):
-//   isEnemyBase @ 0x81  — bool: true=ke thu, false=player/dong-minh
-// Logic:
-//   g_god ON + isEnemyBase==false => skip (player/dong-minh khong mat mau)
-
-typedef void (*t_TakeDamage)(void* self, int64_t num, bool isCritical, bool markDamage, void* mi);
-static t_TakeDamage o_TakeDamage      = nullptr;
-static t_TakeDamage o_CountTakeDamage = nullptr;
-
-static void HandleTakeDamage(t_TakeDamage orig, void* self, int64_t num, bool isCritical, bool markDamage, void* mi) {
-    if(!self)goto call_orig;
-    if(g_god && !Field<bool>(self,0x81)){
-        return; // God: chan sat thuong cho player/dong-minh
-    }
-call_orig:
-    if(orig) orig(self,num,isCritical,markDamage,mi);
-}
-
-// 7. DAME — Fomula class (attack-side, nhan sat thuong player+dong-minh)
+// 6. DAME — Fomula class (attack-side, nhan sat thuong player+dong-minh)
 // AtkPack: damage @ 0x10 (Int64), isCritical @ 0x18 (bool)
 // Fomula static class (ns="") cac public function tra ve AtkPack:
 //   GetPlayerAtk(attackRate)              @ 0x240DE88  — normal attack player
@@ -240,88 +222,34 @@ void* h_GetFriendSkill(int32_t sr, int32_t id, int32_t at, int32_t bp, bool crit
     T_COUNT(GetFriendSkill); void* p=o_GetFriendSkill(sr,id,at,bp,crit,mi); MultDmg(p); return p;
 }
 
-void h_TakeDamage(void* self, int64_t num, bool isCritical, bool markDamage, void* mi){
-    T_COUNT(TakeDamage);
-    HandleTakeDamage(o_TakeDamage,self,num,isCritical,markDamage,mi);
-}
-void h_CountTakeDamage(void* self, int64_t num, bool isCritical, bool markDamage, void* mi){
-    T_COUNT(CountTakeDamage);
-    HandleTakeDamage(o_CountTakeDamage,self,num,isCritical,markDamage,mi);
-}
+// 7. FREE SHOP — PayManager.PayAct
+// PayManager.PayAct(productId, priceId, yesAction) [3 params] mo Google Play dialog
+// PayManager.GrantProductRewardById(productId, out payAmount) [2 params, private] cap do
+// Hook PayAct: khi FreeShop ON, bo qua Google Play, goi GrantProductRewardById truc tiep
+typedef void (*t_PayAct)(void* self, void* productId, int32_t priceId, void* yesAction, void* mi);
+typedef bool (*t_GrantRewardById)(void* self, void* productId, float* payAmount, void* mi);
 
-// 8. FREE SHOP
-// 4 shop cell class, moi cai co Buy() kiem tra currency roi goi BuyItem().
-// Hook Buy() / BuyBtn_OnClick() -> goi BuyItem() thang, bo qua kiem tra tien.
-//   ActivShopCell.Buy()          @ 0x241A79C  -> BuyItem() @ 0x241AA08
-//   AsprintShopCell.Buy()        @ 0x2424270  -> BuyItem() @ 0x24244A8
-//   BlackMarketCell.Buy()        @ 0x24260F4  -> BuyItem() @ 0x24262EC
-//   ExchShopCellCom.BuyBtn_OnClick() @ 0x238E944 -> BuyItem() @ 0x238EB28
+static t_PayAct          o_PayAct          = nullptr;
+static t_GrantRewardById g_GrantRewardById  = nullptr;
 
-typedef void (*t_ShopBuy)(void* self, void* mi);
-static t_ShopBuy fn_ActivBuyItem   = nullptr;
-static t_ShopBuy fn_AsprintBuyItem = nullptr;
-static t_ShopBuy fn_BlackBuyItem   = nullptr;
-static t_ShopBuy fn_ExchBuyItem    = nullptr;
-
-static t_ShopBuy o_ActivBuy   = nullptr;
-static t_ShopBuy o_AsprintBuy = nullptr;
-static t_ShopBuy o_BlackBuy   = nullptr;
-static t_ShopBuy o_ExchBuyBtn = nullptr;
-
-// Hook Init() de zero cost field -> buy button luon enabled khi FreeShop ON
-// ActivShopCell.Init(Int32 id, ActivShopUI shop)  cost@0x5C
-// AsprintShopCell.Init(ShopGoodsData, AsprintShop) cost@0x54
-// BlackMarketCell.Init(ShopGoodsData, Int32)       cost@0x74
-// ExchShopCellCom.Init(ExchShopCom, ShopGoodsData) cost@0x68
-typedef void (*t_ActivInit)  (void* self, int32_t id,    void* shopUI,       void* mi);
-typedef void (*t_AsprintInit)(void* self, void* goodsData, void* shop,       void* mi);
-typedef void (*t_BlackInit)  (void* self, void* goodsData, int32_t idxPD,   void* mi);
-typedef void (*t_ExchInit)   (void* self, void* shop,    void* goodsData,   void* mi);
-static t_ActivInit   o_ActivInit   = nullptr;
-static t_AsprintInit o_AsprintInit = nullptr;
-static t_BlackInit   o_BlackInit   = nullptr;
-static t_ExchInit    o_ExchInit    = nullptr;
-
-void h_ActivInit(void* self, int32_t id, void* shopUI, void* mi){
-    T_COUNT(ActivInit);
-    if(o_ActivInit) o_ActivInit(self,id,shopUI,mi);
-    if(g_free_shop && self) Field<int32_t>(self,0x5C)=0;
-}
-void h_AsprintInit(void* self, void* goodsData, void* shop, void* mi){
-    T_COUNT(AsprintInit);
-    if(o_AsprintInit) o_AsprintInit(self,goodsData,shop,mi);
-    if(g_free_shop && self) Field<int32_t>(self,0x54)=0;
-}
-void h_BlackInit(void* self, void* goodsData, int32_t idxPD, void* mi){
-    T_COUNT(BlackInit);
-    if(o_BlackInit) o_BlackInit(self,goodsData,idxPD,mi);
-    if(g_free_shop && self) Field<int32_t>(self,0x74)=0;
-}
-void h_ExchInit(void* self, void* shop, void* goodsData, void* mi){
-    T_COUNT(ExchInit);
-    if(o_ExchInit) o_ExchInit(self,shop,goodsData,mi);
-    if(g_free_shop && self) Field<int32_t>(self,0x68)=0;
-}
-
-void h_ActivBuy(void* self, void* mi){
-    T_COUNT(ActivBuy);
-    if(g_free_shop && fn_ActivBuyItem && self){ fn_ActivBuyItem(self,nullptr); return; }
-    if(o_ActivBuy) o_ActivBuy(self,mi);
-}
-void h_AsprintBuy(void* self, void* mi){
-    T_COUNT(AsprintBuy);
-    if(g_free_shop && fn_AsprintBuyItem && self){ fn_AsprintBuyItem(self,nullptr); return; }
-    if(o_AsprintBuy) o_AsprintBuy(self,mi);
-}
-void h_BlackBuy(void* self, void* mi){
-    T_COUNT(BlackBuy);
-    if(g_free_shop && fn_BlackBuyItem && self){ fn_BlackBuyItem(self,nullptr); return; }
-    if(o_BlackBuy) o_BlackBuy(self,mi);
-}
-void h_ExchBuyBtn(void* self, void* mi){
-    T_COUNT(ExchBuyBtn);
-    if(g_free_shop && fn_ExchBuyItem && self){ fn_ExchBuyItem(self,nullptr); return; }
-    if(o_ExchBuyBtn) o_ExchBuyBtn(self,mi);
+void h_PayAct(void* self, void* productId, int32_t priceId, void* yesAction, void* mi) {
+    T_COUNT(PayAct);
+    if (!g_free_shop || !self) {
+        if (o_PayAct) o_PayAct(self, productId, priceId, yesAction, mi);
+        return;
+    }
+    float payAmount = 0.0f;
+    bool ok = g_GrantRewardById ? g_GrantRewardById(self, productId, &payAmount, nullptr) : false;
+    LOGI("FreeShop: GrantRewardById -> %s amount=%.2f", ok?"OK":"FAIL", payAmount);
+    // Invoke yesAction (UI refresh callback)
+    if (yesAction && il2cpp_object_get_class && il2cpp_runtime_invoke) {
+        void* cls = il2cpp_object_get_class(yesAction);
+        void* invM = cls ? FindMethod(cls, "Invoke", 0) : nullptr;
+        if (invM) {
+            void* exc = nullptr;
+            il2cpp_runtime_invoke(invM, yesAction, nullptr, &exc);
+        }
+    }
 }
 
 // 9. GAN HOOK
@@ -330,9 +258,6 @@ static void ResolveAll(){
     T_HOOK("UnityEngine","Time","get_timeScale",0,getTS);
     T_HOOK("UnityEngine","Time","set_timeScale",1,setTS);
     if(o_getTS) g_gameScale=o_getTS(nullptr);
-    // Health.TakeDamage(3) — chi god mode
-    T_HOOK("","Health","TakeDamage",3,TakeDamage);
-    T_HOOK("","CountHealth","TakeDamage",3,CountTakeDamage);
     // Dame — Fomula attack-side multiplier
     T_HOOK("","Fomula","GetPlayerAtk",1,GetPlayerAtk);
     T_HOOK("","Fomula","GetPlayerSkill",1,GetPlayerSkill);
@@ -340,24 +265,10 @@ static void ResolveAll(){
     T_HOOK("","Fomula","GetPlayerLightning",0,GetPlayerLightning);
     T_HOOK("","Fomula","GetFriendAtk",4,GetFriendAtk);
     T_HOOK("","Fomula","GetFriendSkill",5,GetFriendSkill);
-    // Free Shop: cache BuyItem() roi hook Buy() cua tung shop cell class
-    {void* k=FindClassAnywhere("ActivShopCell");
-     if(k){void* m=FindMethod(k,"BuyItem",0);if(m)fn_ActivBuyItem=(t_ShopBuy)MethodFnPtr(m);LOGI("ActivBuyItem: %p",fn_ActivBuyItem);}
-     T_HOOK("","ActivShopCell","Buy",0,ActivBuy);}
-    {void* k=FindClassAnywhere("AsprintShopCell");
-     if(k){void* m=FindMethod(k,"BuyItem",0);if(m)fn_AsprintBuyItem=(t_ShopBuy)MethodFnPtr(m);LOGI("AsprintBuyItem: %p",fn_AsprintBuyItem);}
-     T_HOOK("","AsprintShopCell","Buy",0,AsprintBuy);}
-    {void* k=FindClassAnywhere("BlackMarketCell");
-     if(k){void* m=FindMethod(k,"BuyItem",0);if(m)fn_BlackBuyItem=(t_ShopBuy)MethodFnPtr(m);LOGI("BlackBuyItem: %p",fn_BlackBuyItem);}
-     T_HOOK("","BlackMarketCell","Buy",0,BlackBuy);}
-    {void* k=FindClassAnywhere("ExchShopCellCom");
-     if(k){void* m=FindMethod(k,"BuyItem",0);if(m)fn_ExchBuyItem=(t_ShopBuy)MethodFnPtr(m);LOGI("ExchBuyItem: %p",fn_ExchBuyItem);}
-     T_HOOK("","ExchShopCellCom","BuyBtn_OnClick",0,ExchBuyBtn);}
-    // Hook Init() de zero cost -> buy button luon enabled khi FreeShop ON
-    T_HOOK("","ActivShopCell","Init",2,ActivInit);
-    T_HOOK("","AsprintShopCell","Init",2,AsprintInit);
-    T_HOOK("","BlackMarketCell","Init",2,BlackInit);
-    T_HOOK("","ExchShopCellCom","Init",2,ExchInit);
+    // Free Shop: hook PayManager.PayAct (nguon goc tat ca IAP)
+    {void* k=FindClassAnywhere("PayManager");
+     if(k){void* m=FindMethod(k,"GrantProductRewardById",2);if(m)g_GrantRewardById=(t_GrantRewardById)MethodFnPtr(m);LOGI("GrantRewardById: %p",(void*)g_GrantRewardById);}
+     T_HOOK("","PayManager","PayAct",3,PayAct);}
     TraceReport();
     LOGI("=== Resolve DONE ===");
 }
@@ -367,9 +278,8 @@ jobjectArray GetFeatureList(JNIEnv* env,jobject){
     const char* features[]={
         OBFUSCATE("Category_" GAME_NAME),
         OBFUSCATE("0_SeekBar_\xe2\x9a\xa1 Toc Do Game_1_10"),
-        OBFUSCATE("1_Toggle_\xf0\x9f\x9b\xa1 Bat Tu"),
-        OBFUSCATE("2_Spinner_\xe2\x9a\x94 Dame_Off,x5,x10,x20"),
-        OBFUSCATE("3_Toggle_\xf0\x9f\x9b\x92 Free Shop"),
+        OBFUSCATE("1_Spinner_\xe2\x9a\x94 Dame_Off,x5,x10,x20"),
+        OBFUSCATE("2_Toggle_\xf0\x9f\x9b\x92 Free Shop"),
     };
     int total=sizeof(features)/sizeof(features[0]);
     jobjectArray ret=env->NewObjectArray(total,env->FindClass("java/lang/String"),env->NewStringUTF(""));
@@ -381,9 +291,8 @@ void Changes(JNIEnv* env,jclass,jobject,jint featNum,jstring featName,jint value
     T_STEP("bam tinh nang %d (val=%d bat=%d)",featNum,value,boolean);
     switch(featNum){
         case 0: g_speed=(value<1)?1.0f:(float)value; ApplySpeed(); break;
-        case 1: g_god=boolean; LOGI("BatTu: %s",g_god?"BAT":"TAT"); break;
-        case 2: { static const int mults[]={1,5,10,20}; g_dmg_mult=(value>=0&&value<4)?mults[value]:1; LOGI("Dame: x%d",g_dmg_mult); break; }
-        case 3: g_free_shop=boolean; LOGI("FreeShop: %s",g_free_shop?"BAT":"TAT"); break;
+        case 1: { static const int mults[]={1,5,10,20}; g_dmg_mult=(value>=0&&value<4)?mults[value]:1; LOGI("Dame: x%d",g_dmg_mult); break; }
+        case 2: g_free_shop=boolean; LOGI("FreeShop: %s",g_free_shop?"BAT":"TAT"); break;
     }
 }
 
