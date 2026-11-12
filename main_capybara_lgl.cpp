@@ -1,6 +1,6 @@
 // ============================================================
 //  LGL MOD — com.yibu.CapybaraSurvivorGOGOGO v10.0.1
-//  Chuc nang: Speed (1-10x) + Bat Tu + Dame 1-Phat-Chet + Free Shop
+//  Chuc nang: Speed (1-10x) + Bat Tu + Dame xN + Free Shop
 // ============================================================
 
 #include <pthread.h>
@@ -165,7 +165,7 @@ template <typename T> static inline T& Field(void* obj, int off) {
 // 4. TRANG THAI
 static float g_speed     = 1.0f;
 static bool  g_god       = false;
-static bool  g_dame      = false;
+static int   g_dmg_mult  = 1;    // 1=off, 5/10/20=nhan sat thuong player
 static bool  g_free_shop = false;
 
 // 5. SPEED — UnityEngine.Time
@@ -182,17 +182,12 @@ static void ApplySpeed(){
     LOGI("Speed x%.0f applied",g_speed);
 }
 
-// 6. HEALTH.TAKEDAMAGE
+// 6. HEALTH.TAKEDAMAGE — chi dung cho God Mode
 // Health.TakeDamage(Int64 num, Boolean isCritical, Boolean markDamage) @ 0x22E7744
 // Fields (du dump.cs):
 //   isEnemyBase @ 0x81  — bool: true=ke thu, false=player/dong-minh
-//   curHealth   @ 0x20  — Int64: mau hien tai
-//   maxHealth   @ 0x28  — Int64: mau toi da
-//   isDead      @ 0x8C  — bool
-//   isInvincible @ 0xE0 — bool
 // Logic:
-//   g_god ON  + isEnemyBase==false => skip (player khong mat mau)
-//   g_dame ON + isEnemyBase==true  => truyen num=maxHealth (chet 1 phat, giu du event)
+//   g_god ON + isEnemyBase==false => skip (player/dong-minh khong mat mau)
 
 typedef void (*t_TakeDamage)(void* self, int64_t num, bool isCritical, bool markDamage, void* mi);
 static t_TakeDamage o_TakeDamage      = nullptr;
@@ -200,22 +195,49 @@ static t_TakeDamage o_CountTakeDamage = nullptr;
 
 static void HandleTakeDamage(t_TakeDamage orig, void* self, int64_t num, bool isCritical, bool markDamage, void* mi) {
     if(!self)goto call_orig;
-    // God mode: player/dong-minh khong mat mau
     if(g_god && !Field<bool>(self,0x81)){
-        LOGI("God: chan %lld sat thuong cho self=%p",num,self);
-        return;
-    }
-    // Dame: ke thu chet 1 phat
-    if(g_dame && Field<bool>(self,0x81)){
-        int64_t maxHP = Field<int64_t>(self,0x28);
-        if(maxHP > 0){
-            LOGI("Dame: 1-shot ke thu self=%p maxHP=%lld",self,maxHP);
-            if(orig) orig(self,maxHP,isCritical,markDamage,mi);
-            return;
-        }
+        return; // God: chan sat thuong cho player/dong-minh
     }
 call_orig:
     if(orig) orig(self,num,isCritical,markDamage,mi);
+}
+
+// 7. DAME — Fomula class (attack-side, nhan sat thuong player+dong-minh)
+// AtkPack: damage @ 0x10 (Int64), isCritical @ 0x18 (bool)
+// Fomula static class (ns="") cac public function tra ve AtkPack:
+//   GetPlayerAtk(attackRate)              @ 0x240DE88  — normal attack player
+//   GetPlayerSkill(skillRate)             @ 0x240EC74  — skill player
+//   GetPlayerSword()                      @ 0x240EDD8  — sword player
+//   GetPlayerLightning()                  @ 0x240EF24  — lightning player
+//   GetFriendAtk(id,atkTrans,bp,rate)    @ 0x240E2D0  — normal dong-minh
+//   GetFriendSkill(rate,id,at,bp,crit)   @ 0x240E5BC  — skill dong-minh
+
+typedef void* (*t_GetAtk1)(int32_t, void*);
+typedef void* (*t_GetAtk0)(void*);
+typedef void* (*t_GetFriendAtk4)(int32_t, int32_t, int32_t, int32_t, void*);
+typedef void* (*t_GetFriendSkill5)(int32_t, int32_t, int32_t, int32_t, bool, void*);
+
+static t_GetAtk1       o_GetPlayerAtk      = nullptr;
+static t_GetAtk1       o_GetPlayerSkill    = nullptr;
+static t_GetAtk0       o_GetPlayerSword    = nullptr;
+static t_GetAtk0       o_GetPlayerLightning = nullptr;
+static t_GetFriendAtk4  o_GetFriendAtk     = nullptr;
+static t_GetFriendSkill5 o_GetFriendSkill  = nullptr;
+
+static inline void MultDmg(void* pack) {
+    if (!pack || g_dmg_mult <= 1) return;
+    Field<int64_t>(pack, 0x10) *= g_dmg_mult;
+}
+
+void* h_GetPlayerAtk(int32_t r, void* mi)      { T_COUNT(GetPlayerAtk);      void* p=o_GetPlayerAtk(r,mi);            MultDmg(p); return p; }
+void* h_GetPlayerSkill(int32_t r, void* mi)    { T_COUNT(GetPlayerSkill);    void* p=o_GetPlayerSkill(r,mi);           MultDmg(p); return p; }
+void* h_GetPlayerSword(void* mi)               { T_COUNT(GetPlayerSword);     void* p=o_GetPlayerSword(mi);             MultDmg(p); return p; }
+void* h_GetPlayerLightning(void* mi)           { T_COUNT(GetPlayerLightning); void* p=o_GetPlayerLightning(mi);         MultDmg(p); return p; }
+void* h_GetFriendAtk(int32_t id, int32_t at, int32_t bp, int32_t ar, void* mi) {
+    T_COUNT(GetFriendAtk);  void* p=o_GetFriendAtk(id,at,bp,ar,mi); MultDmg(p); return p;
+}
+void* h_GetFriendSkill(int32_t sr, int32_t id, int32_t at, int32_t bp, bool crit, void* mi) {
+    T_COUNT(GetFriendSkill); void* p=o_GetFriendSkill(sr,id,at,bp,crit,mi); MultDmg(p); return p;
 }
 
 void h_TakeDamage(void* self, int64_t num, bool isCritical, bool markDamage, void* mi){
@@ -227,7 +249,7 @@ void h_CountTakeDamage(void* self, int64_t num, bool isCritical, bool markDamage
     HandleTakeDamage(o_CountTakeDamage,self,num,isCritical,markDamage,mi);
 }
 
-// 7. FREE SHOP
+// 8. FREE SHOP
 // 4 shop cell class, moi cai co Buy() kiem tra currency roi goi BuyItem().
 // Hook Buy() / BuyBtn_OnClick() -> goi BuyItem() thang, bo qua kiem tra tien.
 //   ActivShopCell.Buy()          @ 0x241A79C  -> BuyItem() @ 0x241AA08
@@ -302,16 +324,22 @@ void h_ExchBuyBtn(void* self, void* mi){
     if(o_ExchBuyBtn) o_ExchBuyBtn(self,mi);
 }
 
-// 8. GAN HOOK
+// 9. GAN HOOK
 static void ResolveAll(){
     LOGI("=== Resolve START ===");
     T_HOOK("UnityEngine","Time","get_timeScale",0,getTS);
     T_HOOK("UnityEngine","Time","set_timeScale",1,setTS);
     if(o_getTS) g_gameScale=o_getTS(nullptr);
-    // Health.TakeDamage(3)
+    // Health.TakeDamage(3) — chi god mode
     T_HOOK("","Health","TakeDamage",3,TakeDamage);
-    // CountHealth.TakeDamage(3) — subclass override, hook rieng
     T_HOOK("","CountHealth","TakeDamage",3,CountTakeDamage);
+    // Dame — Fomula attack-side multiplier
+    T_HOOK("","Fomula","GetPlayerAtk",1,GetPlayerAtk);
+    T_HOOK("","Fomula","GetPlayerSkill",1,GetPlayerSkill);
+    T_HOOK("","Fomula","GetPlayerSword",0,GetPlayerSword);
+    T_HOOK("","Fomula","GetPlayerLightning",0,GetPlayerLightning);
+    T_HOOK("","Fomula","GetFriendAtk",4,GetFriendAtk);
+    T_HOOK("","Fomula","GetFriendSkill",5,GetFriendSkill);
     // Free Shop: cache BuyItem() roi hook Buy() cua tung shop cell class
     {void* k=FindClassAnywhere("ActivShopCell");
      if(k){void* m=FindMethod(k,"BuyItem",0);if(m)fn_ActivBuyItem=(t_ShopBuy)MethodFnPtr(m);LOGI("ActivBuyItem: %p",fn_ActivBuyItem);}
@@ -334,13 +362,13 @@ static void ResolveAll(){
     LOGI("=== Resolve DONE ===");
 }
 
-// 9. MENU
+// 10. MENU
 jobjectArray GetFeatureList(JNIEnv* env,jobject){
     const char* features[]={
         OBFUSCATE("Category_" GAME_NAME),
         OBFUSCATE("0_SeekBar_\xe2\x9a\xa1 Toc Do Game_1_10"),
         OBFUSCATE("1_Toggle_\xf0\x9f\x9b\xa1 Bat Tu"),
-        OBFUSCATE("2_Toggle_\xe2\x9a\x94 Dame 1-Phat-Chet"),
+        OBFUSCATE("2_Spinner_\xe2\x9a\x94 Dame_Off,x5,x10,x20"),
         OBFUSCATE("3_Toggle_\xf0\x9f\x9b\x92 Free Shop"),
     };
     int total=sizeof(features)/sizeof(features[0]);
@@ -354,12 +382,12 @@ void Changes(JNIEnv* env,jclass,jobject,jint featNum,jstring featName,jint value
     switch(featNum){
         case 0: g_speed=(value<1)?1.0f:(float)value; ApplySpeed(); break;
         case 1: g_god=boolean; LOGI("BatTu: %s",g_god?"BAT":"TAT"); break;
-        case 2: g_dame=boolean; LOGI("Dame: %s",g_dame?"BAT":"TAT"); break;
+        case 2: { static const int mults[]={1,5,10,20}; g_dmg_mult=(value>=0&&value<4)?mults[value]:1; LOGI("Dame: x%d",g_dmg_mult); break; }
         case 3: g_free_shop=boolean; LOGI("FreeShop: %s",g_free_shop?"BAT":"TAT"); break;
     }
 }
 
-// 10. KHOI TAO
+// 11. KHOI TAO
 static volatile bool g_il2cpp_ready=false;
 static int (*o_il2cpp_init)(const char*)=nullptr;
 static int h_il2cpp_init(const char* domain_name){
