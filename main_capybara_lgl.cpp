@@ -246,6 +246,41 @@ static t_ShopBuy o_AsprintBuy = nullptr;
 static t_ShopBuy o_BlackBuy   = nullptr;
 static t_ShopBuy o_ExchBuyBtn = nullptr;
 
+// Hook Init() de zero cost field -> buy button luon enabled khi FreeShop ON
+// ActivShopCell.Init(Int32 id, ActivShopUI shop)  cost@0x5C
+// AsprintShopCell.Init(ShopGoodsData, AsprintShop) cost@0x54
+// BlackMarketCell.Init(ShopGoodsData, Int32)       cost@0x74
+// ExchShopCellCom.Init(ExchShopCom, ShopGoodsData) cost@0x68
+typedef void (*t_ActivInit)  (void* self, int32_t id,    void* shopUI,       void* mi);
+typedef void (*t_AsprintInit)(void* self, void* goodsData, void* shop,       void* mi);
+typedef void (*t_BlackInit)  (void* self, void* goodsData, int32_t idxPD,   void* mi);
+typedef void (*t_ExchInit)   (void* self, void* shop,    void* goodsData,   void* mi);
+static t_ActivInit   o_ActivInit   = nullptr;
+static t_AsprintInit o_AsprintInit = nullptr;
+static t_BlackInit   o_BlackInit   = nullptr;
+static t_ExchInit    o_ExchInit    = nullptr;
+
+void h_ActivInit(void* self, int32_t id, void* shopUI, void* mi){
+    T_COUNT(ActivInit);
+    if(o_ActivInit) o_ActivInit(self,id,shopUI,mi);
+    if(g_free_shop && self) Field<int32_t>(self,0x5C)=0;
+}
+void h_AsprintInit(void* self, void* goodsData, void* shop, void* mi){
+    T_COUNT(AsprintInit);
+    if(o_AsprintInit) o_AsprintInit(self,goodsData,shop,mi);
+    if(g_free_shop && self) Field<int32_t>(self,0x54)=0;
+}
+void h_BlackInit(void* self, void* goodsData, int32_t idxPD, void* mi){
+    T_COUNT(BlackInit);
+    if(o_BlackInit) o_BlackInit(self,goodsData,idxPD,mi);
+    if(g_free_shop && self) Field<int32_t>(self,0x74)=0;
+}
+void h_ExchInit(void* self, void* shop, void* goodsData, void* mi){
+    T_COUNT(ExchInit);
+    if(o_ExchInit) o_ExchInit(self,shop,goodsData,mi);
+    if(g_free_shop && self) Field<int32_t>(self,0x68)=0;
+}
+
 void h_ActivBuy(void* self, void* mi){
     T_COUNT(ActivBuy);
     if(g_free_shop && fn_ActivBuyItem && self){ fn_ActivBuyItem(self,nullptr); return; }
@@ -290,6 +325,11 @@ static void ResolveAll(){
     {void* k=FindClassAnywhere("ExchShopCellCom");
      if(k){void* m=FindMethod(k,"BuyItem",0);if(m)fn_ExchBuyItem=(t_ShopBuy)MethodFnPtr(m);LOGI("ExchBuyItem: %p",fn_ExchBuyItem);}
      T_HOOK("","ExchShopCellCom","BuyBtn_OnClick",0,ExchBuyBtn);}
+    // Hook Init() de zero cost -> buy button luon enabled khi FreeShop ON
+    T_HOOK("","ActivShopCell","Init",2,ActivInit);
+    T_HOOK("","AsprintShopCell","Init",2,AsprintInit);
+    T_HOOK("","BlackMarketCell","Init",2,BlackInit);
+    T_HOOK("","ExchShopCellCom","Init",2,ExchInit);
     TraceReport();
     LOGI("=== Resolve DONE ===");
 }
