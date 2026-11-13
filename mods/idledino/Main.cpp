@@ -1,6 +1,6 @@
 // ═══════════════════════════════════════════════════════════
-// Idle Dino — LGL Mod v13
-// Free Shop (12 entitlements) + Thanh kéo tài nguyên
+// Idle Dino — LGL Mod v14
+// Free Shop (12 entitlements) + Button tai nguyen
 // ═══════════════════════════════════════════════════════════
 #define LOG_TAG      "IDLEDINO_MOD"
 #define GAME_NAME    "Idle Dino"
@@ -25,23 +25,23 @@
 #include <atomic>
 #include <cmath>
 
-// ─── 1. Trạng thái mod ────────────────────────────────────────────────────
+// ─── 1. Trạng thái mod ────────────────────────────────────────────
 static bool              isGameReady   = false;
 static std::atomic<bool> g_godot_found {false};
 static uintptr_t         g_godot_base  = 0;
 
-// ─── 2. Offset ────────────────────────────────────────────────────────────
+// ─── 2. Offset ───────────────────────────────────────────────────────────────────
 #define GODOT_OFFSET_EMIT_SIGNAL  0x1235570
 #define GODOT_OFFSET_REG_SINGLE   0x1234678
 
-// ─── 3. FIX LGL 3.2 native methods ──────────────────────────────────────
+// ─── 3. FIX LGL 3.2 native methods ───────────────────────────────────────────
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_android_support_Menu_getMenuTitle(JNIEnv* env, jobject) {
     return env->NewStringUTF(GAME_NAME);
 }
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_android_support_Menu_getMenuSubtitle(JNIEnv* env, jobject) {
-    return env->NewStringUTF("Free Shop + Tai Nguyen v13");
+    return env->NewStringUTF("Free Shop + Tai Nguyen v14");
 }
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_android_support_Menu_getZaloText(JNIEnv* env, jobject) { return env->NewStringUTF(""); }
@@ -58,7 +58,7 @@ Java_com_android_support_Menu_getWebLink(JNIEnv* env, jobject)  { return env->Ne
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_android_support_Menu_VerifyKeyNative(JNIEnv*, jobject, jstring) { return JNI_TRUE; }
 
-// ─── 4. Cache JNI classes ─────────────────────────────────────────────────
+// ─── 4. Cache JNI classes ───────────────────────────────────────────────────────────────
 static jclass    g_boolClass  = nullptr;
 static jmethodID g_boolCtor   = nullptr;
 static jmethodID g_boolValueOf= nullptr;
@@ -77,7 +77,7 @@ static void CacheClasses(JNIEnv* env) {
     env->DeleteLocalRef(oc);
 }
 
-// ─── 5. Fake purchase_result ──────────────────────────────────────────────
+// ─── 5. Fake purchase_result ───────────────────────────────────────────────────────────
 static void FakePurchaseSuccess(JNIEnv* env, jobjectArray params) {
     if (!params || env->GetArrayLength(params) < 1) return;
     jobject dict = env->GetObjectArrayElement(params, 0);
@@ -126,7 +126,7 @@ static void FakePurchaseSuccess(JNIEnv* env, jobjectArray params) {
     env->DeleteLocalRef(dict);
 }
 
-// ─── 6. Danh sách 12 entitlement ─────────────────────────────────────────
+// ─── 6. Danh sách 12 entitlement ─────────────────────────────────────────────────────
 static const char* k_ents[] = {
     "remove_banner_ads", "remove_all_ads", "auto_upgrade", "more_dna",
     "unlimited_storage", "field_season_pass", "premium_set_q",
@@ -134,7 +134,7 @@ static const char* k_ents[] = {
     "explorer_pack", "legend_pack", nullptr
 };
 
-// ─── 7. Tìm base libgodot_android.so ──────────────────────────────────────
+// ─── 7. Tìm base libgodot_android.so ──────────────────────────────────────────────────────
 static bool FindGodotBase() {
     bool found = false;
     dl_iterate_phdr([](struct dl_phdr_info* info, size_t, void* data) -> int {
@@ -149,7 +149,7 @@ static bool FindGodotBase() {
     return found;
 }
 
-// ─── 8. Hook: nativeEmitSignal ────────────────────────────────────────────
+// ─── 8. Hook: nativeEmitSignal ────────────────────────────────────────────────────────────
 typedef void (*t_EmitSignal)(JNIEnv*, jclass, jlong, jstring, jobjectArray);
 static t_EmitSignal o_EmitSignal = nullptr;
 static jlong g_plugin_obj_id = 0;
@@ -205,7 +205,7 @@ static void h_EmitSignal(JNIEnv* env, jclass clazz,
     if (doReInject) ReInjectAll(env, clazz);
 }
 
-// ─── 9. Hook: nativeRegisterSingleton ────────────────────────────────────
+// ─── 9. Hook: nativeRegisterSingleton ──────────────────────────────────────────────────────
 typedef void (*t_RegSingle)(JNIEnv*, jclass, jlong, jstring);
 static t_RegSingle o_RegSingle = nullptr;
 
@@ -218,18 +218,17 @@ static void h_RegSingle(JNIEnv* env, jclass clazz, jlong objId, jstring pluginNa
     if (o_RegSingle) o_RegSingle(env, clazz, objId, pluginName);
 }
 
-// ─── 10. Tài nguyên — Toggle preset + áp dụng ───────────────────────────
+// ─── 10. Tài nguyên ───────────────────────────────────────────────────────────────────
 #define SAVE_PATH "/data/data/com.minhnguyen.idledino/files/idle_dino_farm.save"
 #define BAK_PATH  "/data/data/com.minhnguyen.idledino/files/idle_dino_farm.save.bak"
 
 #include <time.h>
 
-static long g_set_dna      = 0;
-static long g_set_amber    = 0;
-static long g_set_meat     = 0;
-static long long g_last_apply = 0;
+static long      g_set_dna      = 0;
+static long      g_set_amber    = 0;
+static long      g_set_meat     = 0;
+static long long g_last_apply   = 0;
 
-// Thay "key":SỐ bằng newval trong buffer JSON
 static bool json_set_num(char* buf, long cap, const char* key, const char* newval) {
     char pat[128];
     snprintf(pat, sizeof(pat), "\"%s\":", key);
@@ -241,11 +240,9 @@ static bool json_set_num(char* buf, long cap, const char* key, const char* newva
     if (*end == '-') end++;
     while (*end && (isdigit((unsigned char)*end) || *end == '.' ||
                     *end == 'e' || *end == 'E')) end++;
-
     long new_len = (long)strlen(newval);
     long rest    = (long)strlen(end);
     if ((p - buf) + new_len + rest + 1 > cap) return false;
-
     memmove(p + new_len, end, rest + 1);
     memcpy(p, newval, new_len);
     return true;
@@ -259,7 +256,7 @@ static void ApplyResources() {
     g_last_apply = now;
 
     if (g_set_dna == 0 && g_set_amber == 0 && g_set_meat == 0) {
-        LOGE("[TaiNguyen] Tat ca = 0 — bat 1 toggle truoc roi bam Ap dung");
+        LOGE("[TaiNguyen] Tat ca = 0 — khong the ghi");
         return;
     }
 
@@ -308,9 +305,13 @@ static void ApplyResources() {
 
     free(buf);
     LOGI("[TaiNguyen] XONG! Tat game va mo lai de ap dung.");
+
+    g_set_dna   = 0;
+    g_set_amber = 0;
+    g_set_meat  = 0;
 }
 
-// ─── 11. ResolveAll ──────────────────────────────────────────────────────
+// ─── 11. ResolveAll ───────────────────────────────────────────────────────────────────
 static void ResolveAll() {
     T_STEP("ResolveAll");
     void* a_emit = (void*)(g_godot_base + GODOT_OFFSET_EMIT_SIGNAL);
@@ -329,27 +330,26 @@ static void ResolveAll() {
     TraceReport();
 }
 
-// ─── 12. Menu ────────────────────────────────────────────────────────────
+// ─── 12. Menu ────────────────────────────────────────────────────────────────────────
 static jobjectArray GetFeatureList(JNIEnv* env, jclass) {
-    // Toggle chon gia tri -> bat la ghi, cai sau de len cai truoc
+    // Button: bam 1 lan la ghi luon vao save file
     const char* items[] = {
         "Category_Free Shop",
         "0_Toggle_Free Shop (Luon bat)",
-        "Category_DNA (bat 1 gia tri)",
-        "1_Toggle_DNA 1 trieu",
-        "2_Toggle_DNA 5 trieu",
-        "3_Toggle_DNA 9 trieu",
-        "Category_Amber (bat 1 gia tri)",
-        "4_Toggle_Amber 5000",
-        "5_Toggle_Amber 50000",
-        "6_Toggle_Amber 999999",
-        "Category_Thit (bat 1 gia tri)",
-        "7_Toggle_Thit 1 trieu",
-        "8_Toggle_Thit 5 trieu",
-        "9_Toggle_Thit 9 trieu",
-        "10_Button_Ap dung Save (tat mo lai)"
+        "Category_DNA (bam 1 lan la ghi)",
+        "1_Button_DNA 1 trieu",
+        "2_Button_DNA 5 trieu",
+        "3_Button_DNA 9 trieu",
+        "Category_Amber (bam 1 lan la ghi)",
+        "4_Button_Amber 5000",
+        "5_Button_Amber 50000",
+        "6_Button_Amber 999999",
+        "Category_Thit (bam 1 lan la ghi)",
+        "7_Button_Thit 1 trieu",
+        "8_Button_Thit 5 trieu",
+        "9_Button_Thit 9 trieu"
     };
-    const int N = 15;
+    const int N = 14;
     jclass strClass = env->FindClass("java/lang/String");
     jobjectArray arr = env->NewObjectArray(N, strClass, nullptr);
     for (int i = 0; i < N; i++) {
@@ -361,26 +361,18 @@ static jobjectArray GetFeatureList(JNIEnv* env, jclass) {
     return arr;
 }
 
-static void Changes(JNIEnv*, jclass, jobject, jint featNum, jstring, jfloat, jboolean enabled, jstring) {
+static void Changes(JNIEnv*, jclass, jobject, jint featNum, jstring, jfloat, jboolean, jstring) {
+    // Moi Button bam la set gia tri + ghi luon vao save file
     switch (featNum) {
-        // DNA — bat toggle nao thi ghi gia tri do
-        case 1: if (enabled) { g_set_dna = 1000000L; LOGI("[TaiNguyen] DNA -> 1 trieu"); } break;
-        case 2: if (enabled) { g_set_dna = 5000000L; LOGI("[TaiNguyen] DNA -> 5 trieu"); } break;
-        case 3: if (enabled) { g_set_dna = 9000000L; LOGI("[TaiNguyen] DNA -> 9 trieu"); } break;
-        // Amber
-        case 4: if (enabled) { g_set_amber =   5000L; LOGI("[TaiNguyen] Amber -> 5000"); } break;
-        case 5: if (enabled) { g_set_amber =  50000L; LOGI("[TaiNguyen] Amber -> 50000"); } break;
-        case 6: if (enabled) { g_set_amber = 999999L; LOGI("[TaiNguyen] Amber -> 999999"); } break;
-        // Thit
-        case 7: if (enabled) { g_set_meat = 1000000L; LOGI("[TaiNguyen] Thit -> 1 trieu"); } break;
-        case 8: if (enabled) { g_set_meat = 5000000L; LOGI("[TaiNguyen] Thit -> 5 trieu"); } break;
-        case 9: if (enabled) { g_set_meat = 9000000L; LOGI("[TaiNguyen] Thit -> 9 trieu"); } break;
-        // Ap dung
-        case 10:
-            LOGI("[TaiNguyen] Ap dung: dna=%ld amber=%ld meat=%ld",
-                 g_set_dna, g_set_amber, g_set_meat);
-            ApplyResources();
-            break;
+        case 1: g_set_dna = 1000000L; LOGI("[TaiNguyen] DNA 1 trieu -> ghi");   ApplyResources(); break;
+        case 2: g_set_dna = 5000000L; LOGI("[TaiNguyen] DNA 5 trieu -> ghi");   ApplyResources(); break;
+        case 3: g_set_dna = 9000000L; LOGI("[TaiNguyen] DNA 9 trieu -> ghi");   ApplyResources(); break;
+        case 4: g_set_amber =   5000L; LOGI("[TaiNguyen] Amber 5000 -> ghi");   ApplyResources(); break;
+        case 5: g_set_amber =  50000L; LOGI("[TaiNguyen] Amber 50000 -> ghi");  ApplyResources(); break;
+        case 6: g_set_amber = 999999L; LOGI("[TaiNguyen] Amber 999999 -> ghi"); ApplyResources(); break;
+        case 7: g_set_meat = 1000000L; LOGI("[TaiNguyen] Thit 1 trieu -> ghi"); ApplyResources(); break;
+        case 8: g_set_meat = 5000000L; LOGI("[TaiNguyen] Thit 5 trieu -> ghi"); ApplyResources(); break;
+        case 9: g_set_meat = 9000000L; LOGI("[TaiNguyen] Thit 9 trieu -> ghi"); ApplyResources(); break;
     }
 }
 
@@ -390,10 +382,10 @@ static jboolean my_isGameLibLoaded(JNIEnv*, jclass) {
     return isGameReady ? JNI_TRUE : JNI_FALSE;
 }
 
-// ─── 13. Khởi tạo ────────────────────────────────────────────────────────
+// ─── 13. Khởi tạo ────────────────────────────────────────────────────────────────────────
 static void* mod_thread(void*) {
     T_STEP("wait libgodot_android.so");
-    LOGI("=== IDLE DINO MOD v13 START ===");
+    LOGI("=== IDLE DINO MOD v14 START ===");
     for (int i = 0; i < 300; i++) {
         if (FindGodotBase()) { g_godot_found = true; break; }
         usleep(100000);
@@ -411,7 +403,7 @@ static void* mod_thread(void*) {
 
 __attribute__((constructor))
 static void lib_main() {
-    LOGI("lib_main: Idle Dino Mod v13 loaded");
+    LOGI("lib_main: Idle Dino Mod v14 loaded");
     pthread_t t;
     pthread_create(&t, nullptr, mod_thread, nullptr);
     pthread_detach(t);
