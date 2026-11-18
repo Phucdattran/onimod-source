@@ -984,7 +984,6 @@ static std::atomic<int> g_damage{1}, g_attackSpeed{1}, g_moveSpeed{1}, g_amount{
 static std::atomic<bool> g_combatReady{false},g_resourcesReady{false};
 static std::atomic<int> g_attackRange{1};
 static std::atomic<bool> g_noMiss{false};
-static std::atomic<int> g_skillAmount{1}, g_gemAmount{1};
 static std::atomic<bool> g_doSkill{false}, g_doGem{false};
 struct CFResourceJob { int id; int count; };
 static std::mutex g_jobsMutex;
@@ -1078,11 +1077,11 @@ static void CFGameplayTick() {
     // Skill / Gem one-shot
     if (g_doSkill.exchange(false)) {
         T_STEP("skill grant");
-        CFSkillGrant(g_skillAmount.load());
+        CFSkillGrant(1);
     }
     if (g_doGem.exchange(false)) {
         T_STEP("gem grant");
-        CFGemGrant(g_gemAmount.load());
+        CFGemGrant(1);
     }
     // No Miss: add IgnoreDodge state to player every 2s
     {
@@ -1146,9 +1145,7 @@ jobjectArray GetFeatureList(JNIEnv* env,jobject) {
         OBFUSCATE("106_InputValue_So Luong - Mac Dinh 900000"),
         OBFUSCATE("107_Button_Cong Coin"),
         OBFUSCATE("RichTextView_Coin thay doi tren may. May chu co the dong bo lai."),
-        OBFUSCATE("118_InputValue_So Luong Skill - Mac Dinh 1"),
         OBFUSCATE("119_Button_Mo Skill"),
-        OBFUSCATE("120_InputValue_So Luong Gem - Mac Dinh 1"),
         OBFUSCATE("121_Button_Cong Gem"),
         OBFUSCATE("Category_Quang Cao"),
         OBFUSCATE("110_Toggle_Nhan Thuong Khong Xem Video"),
@@ -1182,9 +1179,7 @@ void Changes(JNIEnv*,jclass,jobject,jint number,jstring,jint value,jboolean enab
     }
     case 113:g_attackRange.store(std::clamp<int>(value,1,50));break;
     case 117:g_noMiss.store(enabled==JNI_TRUE);break;
-    case 118:g_skillAmount.store(std::clamp<int>(value,1,900000));break;
     case 119:g_doSkill.store(true);break;
-    case 120:g_gemAmount.store(std::clamp<int>(value,1,900000));break;
     case 121:g_doGem.store(true);break;
     default:return;
     }
