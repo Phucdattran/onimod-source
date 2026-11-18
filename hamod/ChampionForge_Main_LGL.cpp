@@ -867,6 +867,44 @@ static void CFNoMissApply() {
 }
 static void CFNoMissInvalidate() { cf_nomiss_detail::m={}; }
 
+// --- Mở Skill / Cộng Gem ---
+namespace cf_skill_gem_detail {
+struct Methods {
+    void* gSkillKlass=nullptr;
+    void* gGemKlass=nullptr;
+    void* addSkillMI=nullptr;
+    void* addGemExpMI=nullptr;
+    bool ready=false;
+};
+static Methods m;
+}
+static bool CFSkillGemResolve() {
+    using namespace cf_skill_gem_detail;
+    if (m.ready) return true;
+    Methods next;
+    next.gSkillKlass=CFClass("","GSkill");
+    next.gGemKlass=CFClass("","GGem");
+    if (!next.gSkillKlass || !next.gGemKlass) return false;
+    next.addSkillMI=CFBindMethod(next.gSkillKlass,"AddSkill",{"System.Int32","System.Int32"},"System.Void",true);
+    next.addGemExpMI=CFBindMethod(next.gGemKlass,"AddGemExp",{"System.Int32","System.Int32"},"System.Void",true);
+    if (!next.addSkillMI || !next.addGemExpMI) return false;
+    next.ready=true; m=next;
+    LOGI("SkillGem metadata compatible"); return true;
+}
+static void CFSkillGrant(int count) {
+    using namespace cf_skill_gem_detail;
+    if (!CFSkillGemResolve()) {LOGE("SkillGrant: resolve failed");return;}
+    for (int32_t id=1;id<=50;id++) {int32_t c=count;void* args[]={&id,&c};CFInvoke(m.addSkillMI,nullptr,args);}
+    LOGI("SkillGrant: IDs 1-50 count=%d",count);
+}
+static void CFGemGrant(int count) {
+    using namespace cf_skill_gem_detail;
+    if (!CFSkillGemResolve()) {LOGE("GemGrant: resolve failed");return;}
+    for (int32_t id=1;id<=30;id++) {int32_t c=count;void* args[]={&id,&c};CFInvoke(m.addGemExpMI,nullptr,args);}
+    LOGI("GemGrant: IDs 1-30 count=%d",count);
+}
+static void CFSkillGemInvalidate() { cf_skill_gem_detail::m={}; }
+
 // --- Đóng băng vàng (Coin) ---
 static void (*o_SetCoin)(void*,int64_t,void*) = nullptr;
 static void h_SetCoin(void* self,int64_t value,void* mi) {
@@ -946,6 +984,8 @@ static std::atomic<int> g_damage{1}, g_attackSpeed{1}, g_moveSpeed{1}, g_amount{
 static std::atomic<bool> g_combatReady{false},g_resourcesReady{false};
 static std::atomic<int> g_attackRange{1};
 static std::atomic<bool> g_noMiss{false};
+static std::atomic<int> g_skillAmount{1}, g_gemAmount{1};
+static std::atomic<bool> g_doSkill{false}, g_doGem{false};
 struct CFResourceJob { int id; int count; };
 static std::mutex g_jobsMutex;
 static std::deque<CFResourceJob> g_jobs;
@@ -1035,6 +1075,15 @@ static void CFGameplayTick() {
             if(!ok){CFResourcesInvalidate();g_resourcesReady.store(false);nextBind=now+5000;}
         }
     }
+    // Skill / Gem one-shot
+    if (g_doSkill.exchange(false)) {
+        T_STEP("skill grant");
+        CFSkillGrant(g_skillAmount.load());
+    }
+    if (g_doGem.exchange(false)) {
+        T_STEP("gem grant");
+        CFGemGrant(g_gemAmount.load());
+    }
     // No Miss: add IgnoreDodge state to player every 2s
     {
         static uint64_t nextNoMiss=0;
@@ -1097,6 +1146,10 @@ jobjectArray GetFeatureList(JNIEnv* env,jobject) {
         OBFUSCATE("106_InputValue_So Luong - Mac Dinh 900000"),
         OBFUSCATE("107_Button_Cong Coin"),
         OBFUSCATE("RichTextView_Coin thay doi tren may. May chu co the dong bo lai."),
+        OBFUSCATE("118_InputValue_So Luong Skill - Mac Dinh 1"),
+        OBFUSCATE("119_Button_Mo Skill"),
+        OBFUSCATE("120_InputValue_So Luong Gem - Mac Dinh 1"),
+        OBFUSCATE("121_Button_Cong Gem"),
         OBFUSCATE("Category_Quang Cao"),
         OBFUSCATE("110_Toggle_Nhan Thuong Khong Xem Video"),
     };
@@ -1129,6 +1182,10 @@ void Changes(JNIEnv*,jclass,jobject,jint number,jstring,jint value,jboolean enab
     }
     case 113:g_attackRange.store(std::clamp<int>(value,1,50));break;
     case 117:g_noMiss.store(enabled==JNI_TRUE);break;
+    case 118:g_skillAmount.store(std::clamp<int>(value,1,900000));break;
+    case 119:g_doSkill.store(true);break;
+    case 120:g_gemAmount.store(std::clamp<int>(value,1,900000));break;
+    case 121:g_doGem.store(true);break;
     default:return;
     }
     LOGI("Menu id=%d value=%d enabled=%d",number,value,enabled);
