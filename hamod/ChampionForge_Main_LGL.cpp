@@ -1142,7 +1142,7 @@ jobjectArray GetFeatureList(JNIEnv* env,jobject) {
         OBFUSCATE("113_SeekBar_Danh Xa_1_50"),
         OBFUSCATE("117_Toggle_Danh Luon Trung (No Miss)"),
         OBFUSCATE("Category_Tai Nguyen"),
-        OBFUSCATE("106_InputValue_So Luong - Mac Dinh 900000"),
+        OBFUSCATE("106_InputValue_So Luong - Mac Dinh 1000000"),
         OBFUSCATE("107_Button_Cong Coin"),
         OBFUSCATE("RichTextView_Coin thay doi tren may. May chu co the dong bo lai."),
         OBFUSCATE("119_Button_Mo Skill"),
@@ -1170,7 +1170,7 @@ void Changes(JNIEnv*,jclass,jobject,jint number,jstring,jint value,jboolean enab
     case 104:g_moveSpeed.store(std::clamp<int>(value,1,10));break;
     case 105:g_oneHit.store(enabled==JNI_TRUE);break;
     case 110:g_noAds.store(enabled==JNI_TRUE);break;
-    case 106:g_amount.store(std::clamp<int>(value,1,900000));break;
+    case 106:g_amount.store(std::max<int>(value,1));break;
     case 107:{
         std::lock_guard<std::mutex> lock(g_jobsMutex);
         if (g_jobs.size()<8) g_jobs.push_back({2,g_amount.load()});
