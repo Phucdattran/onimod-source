@@ -26,9 +26,7 @@
 #include "Includes/Logger.h"
 #include "Includes/Utils.h"
 #include <Dobby/dobby.h>
-#define IconWebViewData LglTemplateIconWebViewData
 #include "Menu/Setup.h"
-#undef IconWebViewData
 #include "MenuStrings.h"
 #define LOG_TAG "CHAMPIONFORGE_MOD"
 #define GAME_NAME "Champion Forge - Auto A1"
@@ -40,9 +38,6 @@
 #error This Main.cpp targets arm64-v8a only.
 #endif
 static_assert(sizeof(void*) == 8, "ARM64 required");
-jstring IconWebViewData(JNIEnv* env, jobject thiz) {
-    return Java_com_android_support_Menu_Icon(env, thiz);
-}
 std::atomic<bool> isGameReady{false};
 jboolean my_isGameLibLoaded(JNIEnv*, jobject) { return isGameReady.load() ? JNI_TRUE : JNI_FALSE; }
 static void SafeTraceReinstall() {
